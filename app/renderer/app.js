@@ -134,10 +134,10 @@ async function init() {
   shimDevices = await enumerateAudioDevices();
   populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
   populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
-  // Set channel dropdowns to match the currently configured devices
+  // Set channel dropdowns — honour saved overrides, fall back to detected
   const counts = queryChannelCounts(config.input_device, config.output_device);
-  inputChannelCount = counts.inCount;
-  outputChannelCount = counts.outCount;
+  inputChannelCount = config.input_channels_override || counts.inCount;
+  outputChannelCount = config.output_channels_override || counts.outCount;
   updateChannelDropdowns();
 }
 
@@ -311,7 +311,29 @@ function toggleConnect(id) {
   const btn = document.getElementById(`connect-${id}`);
   btn.textContent = state.connected ? 'Disconnect' : 'Connect';
   btn.classList.toggle('connected', state.connected);
-  // TODO: signal shim to start/stop audio bridge for this channel
+
+  const line = config.lines.find(l => l.id === id);
+  if (!line) return;
+
+  let frame = document.getElementById(`vdo-frame-${id}`);
+  if (state.connected) {
+    if (!frame) {
+      // Embed a hidden iframe that joins the VDO.ninja room as an audio participant.
+      // Electron grants mic permission via the session handler in main.js.
+      frame = document.createElement('iframe');
+      frame.id = `vdo-frame-${id}`;
+      frame.allow = 'microphone; autoplay';
+      frame.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
+      document.body.appendChild(frame);
+    }
+    frame.src = joinUrl(line);
+  } else {
+    if (frame) {
+      // Clear src to disconnect from the room before removing
+      frame.src = '';
+      frame.remove();
+    }
+  }
 }
 
 function copyJoinLink(id) {
@@ -416,6 +438,12 @@ function setupSettings() {
     shimDevices = await enumerateAudioDevices();
     populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
     populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
+    // Show detected channel counts as hints; pre-fill overrides from config
+    const detected = queryChannelCounts(config.input_device, config.output_device);
+    document.getElementById('input-ch-detected').textContent = `(detected: ${detected.inCount})`;
+    document.getElementById('output-ch-detected').textContent = `(detected: ${detected.outCount})`;
+    document.getElementById('input-ch-override').value = config.input_channels_override || '';
+    document.getElementById('output-ch-override').value = config.output_channels_override || '';
     // Pre-populate export code
     document.getElementById('session-export-code').value = exportSession();
     document.getElementById('session-export-msg').textContent = '';
@@ -480,10 +508,14 @@ function setupSettings() {
     config.output_device = document.getElementById('output-device-select').value;
     const isCustom = preset.value === 'custom';
     config.vdo_base_url = isCustom ? customUrl.value.trim() : 'https://vdo.ninja';
-    // Update channel counts before saving so clamped values are persisted
-    const counts = queryChannelCounts(config.input_device, config.output_device);
-    inputChannelCount = counts.inCount;
-    outputChannelCount = counts.outCount;
+    // Apply channel count overrides (or detected values from shim)
+    const inOverride = parseInt(document.getElementById('input-ch-override').value) || 0;
+    const outOverride = parseInt(document.getElementById('output-ch-override').value) || 0;
+    config.input_channels_override = inOverride || null;
+    config.output_channels_override = outOverride || null;
+    const detected = queryChannelCounts(config.input_device, config.output_device);
+    inputChannelCount = inOverride || detected.inCount;
+    outputChannelCount = outOverride || detected.outCount;
     updateChannelDropdowns();
     await window.api.saveConfig(config);
     updateDeviceLabel();
