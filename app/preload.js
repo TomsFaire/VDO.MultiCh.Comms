@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('api', {
   testVdoUrl: (url) => ipcRenderer.invoke('test-vdo-url', url),
   generateQr: (text) => ipcRenderer.invoke('generate-qr', text),
   isFirstRun: () => ipcRenderer.invoke('is-first-run'),
+  connectLine: (id, url) => ipcRenderer.invoke('connect-line', { id, url }),
+  disconnectLine: (id) => ipcRenderer.invoke('disconnect-line', id),
 });

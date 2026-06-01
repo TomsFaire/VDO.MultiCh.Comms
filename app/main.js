@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, session } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, session } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -43,6 +43,9 @@ function saveConfig(cfg) {
 }
 
 let shimProcess = null;
+// Map of line id → WebContentsView for active VDO.ninja connections
+const lineViews = new Map();
+let mainWin = null;
 
 function startShim() {
   if (!fs.existsSync(SHIM_BIN)) {
@@ -56,9 +59,12 @@ function startShim() {
 }
 
 app.whenReady().then(() => {
-  // Grant mic permission so enumerateDevices() returns labels
+  // Grant mic + camera permission for all web contents (renderer + VDO.ninja views)
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(permission === 'media');
+    callback(permission === 'media' || permission === 'microphone' || permission === 'camera');
+  });
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    return permission === 'media' || permission === 'microphone' || permission === 'camera';
   });
 
   // Register is-first-run BEFORE loadConfig() creates the file
@@ -67,7 +73,7 @@ app.whenReady().then(() => {
   const config = loadConfig();
   startShim();
 
-  const win = new BrowserWindow({
+  mainWin = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
@@ -77,7 +83,36 @@ app.whenReady().then(() => {
     title: 'VDO.MultiCh.Comms',
   });
 
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Connect a line: create a WebContentsView that loads VDO.ninja as a real browser tab
+  ipcMain.handle('connect-line', (_, { id, url }) => {
+    if (lineViews.has(id)) return; // already connected
+
+    const view = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+      },
+    });
+
+    // 0×0 at position 0,0 — invisible but fully active (WebRTC runs normally)
+    mainWin.contentView.addChildView(view);
+    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+
+    view.webContents.loadURL(url);
+    lineViews.set(id, view);
+    console.log(`Line ${id} connected: ${url}`);
+  });
+
+  // Disconnect a line: destroy the WebContentsView
+  ipcMain.handle('disconnect-line', (_, id) => {
+    const view = lineViews.get(id);
+    if (!view) return;
+    mainWin.contentView.removeChildView(view);
+    view.webContents.close();
+    lineViews.delete(id);
+    console.log(`Line ${id} disconnected`);
+  });
 
   // IPC handlers
   ipcMain.handle('generate-qr', async (_, text) => {

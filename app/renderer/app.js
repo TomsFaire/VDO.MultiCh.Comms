@@ -294,12 +294,7 @@ function renderLines() {
       const line = config.lines.find((l) => l.id === id);
       if (line) {
         line.name = val;
-        const sanitised = val.toLowerCase().replace(/[^a-z0-9]/g, '');
-        line.room_key = sanitised + Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(0, 4);
-        const url = joinUrl(line);
-        const input = document.getElementById(`join-${id}`);
-        if (input) input.value = url;
-        renderQr(id, url);
+        // Room key is permanent — renaming does not change which room this line uses
         window.api.saveConfig(config);
       }
     });
@@ -318,7 +313,7 @@ function renderLines() {
   });
 }
 
-function toggleConnect(id) {
+async function toggleConnect(id) {
   const state = lineStates[id];
   state.connected = !state.connected;
   const btn = document.getElementById(`connect-${id}`);
@@ -328,24 +323,12 @@ function toggleConnect(id) {
   const line = config.lines.find(l => l.id === id);
   if (!line) return;
 
-  let frame = document.getElementById(`vdo-frame-${id}`);
   if (state.connected) {
-    if (!frame) {
-      // Embed a hidden iframe that joins the VDO.ninja room as an audio participant.
-      // Electron grants mic permission via the session handler in main.js.
-      frame = document.createElement('iframe');
-      frame.id = `vdo-frame-${id}`;
-      frame.allow = 'microphone; autoplay';
-      frame.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
-      document.body.appendChild(frame);
-    }
-    frame.src = joinUrl(line);
+    // Use a WebContentsView in the main process — proper Chromium instance with
+    // real mic access, not a suppressed hidden iframe
+    await window.api.connectLine(id, joinUrl(line));
   } else {
-    if (frame) {
-      // Clear src to disconnect from the room before removing
-      frame.src = '';
-      frame.remove();
-    }
+    await window.api.disconnectLine(id);
   }
 }
 
