@@ -154,12 +154,23 @@ function directorUrl(baseUrl, roomKey) {
     noisetgate: '0',
     compressor: '0',
     autoGain: '0',
+    label: config.instance_name || 'Director',
   });
   return `${baseUrl}/?${params}`;
 }
 
 function joinUrl(line) {
-  return `${config.vdo_base_url}/comms?room=${line.room_key}`;
+  const params = new URLSearchParams({
+    room: line.room_key,
+    vd: '0',
+    videodevice: '0',
+    audio: '1',
+    label: line.location || line.name,
+    noisetgate: '0',
+    compressor: '0',
+    autoGain: '0',
+  });
+  return `${config.vdo_base_url}/?${params}`;
 }
 
 function renderLines() {
@@ -254,7 +265,16 @@ function renderLines() {
       const val = el.textContent.trim() || `PL${id + 1}`;
       el.textContent = val;
       const line = config.lines.find((l) => l.id === id);
-      if (line) { line.name = val; window.api.saveConfig(config); }
+      if (line) {
+        line.name = val;
+        const sanitised = val.toLowerCase().replace(/[^a-z0-9]/g, '');
+        line.room_key = sanitised + Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(0, 4);
+        const url = joinUrl(line);
+        const input = document.getElementById(`join-${id}`);
+        if (input) input.value = url;
+        renderQr(id, url);
+        window.api.saveConfig(config);
+      }
     });
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } });
   });
