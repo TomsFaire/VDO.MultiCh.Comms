@@ -47,14 +47,27 @@ let shimProcess = null;
 const lineViews = new Map();
 let mainWin = null;
 
-function startShim() {
+// Capture first-run state before loadConfig() creates the file
+const FIRST_RUN = !fs.existsSync(CONFIG_PATH);
+
+function killPortAndStartShim() {
   if (!fs.existsSync(SHIM_BIN)) {
     console.warn('Shim binary not found at', SHIM_BIN, '— audio I/O disabled');
     return;
   }
-  shimProcess = spawn(SHIM_BIN, [], { stdio: 'inherit' });
-  shimProcess.on('exit', (code) => {
-    console.log('Shim exited with code', code);
+  // Kill any process already holding port 9696 before spawning the shim
+  const killer = spawn('lsof', ['-ti', 'tcp:9696']);
+  let pids = '';
+  killer.stdout.on('data', d => { pids += d.toString(); });
+  killer.on('close', () => {
+    pids.trim().split('\n').filter(Boolean).forEach(pid => {
+      try { process.kill(parseInt(pid), 'SIGTERM'); } catch (_) {}
+    });
+    // Small delay to let the port release
+    setTimeout(() => {
+      shimProcess = spawn(SHIM_BIN, [], { stdio: 'inherit' });
+      shimProcess.on('exit', code => console.log('Shim exited with code', code));
+    }, 300);
   });
 }
 
@@ -67,11 +80,11 @@ app.whenReady().then(() => {
     return permission === 'media' || permission === 'microphone' || permission === 'camera';
   });
 
-  // Register is-first-run BEFORE loadConfig() creates the file
-  ipcMain.handle('is-first-run', () => !fs.existsSync(CONFIG_PATH));
+  // FIRST_RUN was captured at module load, before loadConfig() created the file
+  ipcMain.handle('is-first-run', () => FIRST_RUN);
 
   const config = loadConfig();
-  startShim();
+  killPortAndStartShim();
 
   mainWin = new BrowserWindow({
     width: 1200,
