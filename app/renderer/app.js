@@ -224,8 +224,8 @@ function renderLines() {
       <button class="connect-btn" id="connect-${line.id}" onclick="toggleConnect(${line.id})">Connect</button>
       <div class="director-row">
         <span class="director-label">Director</span>
-        <a class="director-link" id="director-${line.id}" href="${directorUrl(config.vdo_base_url, line.room_key)}" target="_blank">${directorUrl(config.vdo_base_url, line.room_key)}</a>
-        <button onclick="copyDirectorLink(${line.id})">Copy</button>
+        <a class="director-link" id="director-${line.id}" href="${directorUrl(config.vdo_base_url, line.room_key)}" target="_blank">Open ↗</a>
+        <button onclick="copyDirectorLink(${line.id})">Copy link</button>
       </div>
     `;
 
