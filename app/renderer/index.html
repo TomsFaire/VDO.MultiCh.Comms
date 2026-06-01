@@ -50,6 +50,13 @@
     .connect-btn.connected { background: #5c2a2a; color: #c87e7e; }
     .connect-btn:hover { filter: brightness(1.2); }
 
+    .director-row { display: flex; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid #2e2e2e; }
+    .director-label { font-size: 11px; color: #666; white-space: nowrap; }
+    .director-link { flex: 1; font-size: 10px; color: #4a8a6a; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; min-width: 0; }
+    .director-link:hover { color: #7ec87e; text-decoration: underline; }
+    .director-row button { font-size: 11px; background: #333; border: none; color: #ccc; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+    .director-row button:hover { background: #444; }
+
     /* Settings overlay */
     #settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 100; }
     #settings-overlay.open { display: flex; }

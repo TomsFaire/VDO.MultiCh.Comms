@@ -155,6 +155,8 @@ function directorUrl(baseUrl, roomKey) {
     compressor: '0',
     autoGain: '0',
     label: config.instance_name || 'Director',
+    notify: '1',           // audio alert when guests join/leave
+    showconnections: '1',  // show P2P connection status per guest
   });
   return `${baseUrl}/?${params}`;
 }
@@ -166,6 +168,9 @@ function joinUrl(line) {
     videodevice: '0',
     audio: '1',
     label: line.location || line.name,
+    labelsuggestion: '1', // prompt for name if location not set
+    monomic: '1',         // force mono mic — correct for party line
+    proaudio: '1',        // bypass browser noise suppression aggressively
     noisetgate: '0',
     compressor: '0',
     autoGain: '0',
@@ -217,6 +222,11 @@ function renderLines() {
         </div>
       </div>
       <button class="connect-btn" id="connect-${line.id}" onclick="toggleConnect(${line.id})">Connect</button>
+      <div class="director-row">
+        <span class="director-label">Director</span>
+        <a class="director-link" id="director-${line.id}" href="${directorUrl(config.vdo_base_url, line.room_key)}" target="_blank">${directorUrl(config.vdo_base_url, line.room_key)}</a>
+        <button onclick="copyDirectorLink(${line.id})">Copy</button>
+      </div>
     `;
 
     container.appendChild(panel);
@@ -306,6 +316,16 @@ function copyJoinLink(id) {
   const btn = el.nextElementSibling;
   btn.textContent = 'Copied!';
   setTimeout(() => (btn.textContent = 'Copy'), 1500);
+}
+
+function copyDirectorLink(id) {
+  const line = config.lines.find(l => l.id === id);
+  if (!line) return;
+  const url = directorUrl(config.vdo_base_url, line.room_key);
+  navigator.clipboard.writeText(url);
+  const btn = document.querySelector(`#director-${id} + button`) ||
+    document.querySelector(`.director-row button[onclick="copyDirectorLink(${id})"]`);
+  if (btn) { btn.textContent = 'Copied!'; setTimeout(() => (btn.textContent = 'Copy'), 1500); }
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
