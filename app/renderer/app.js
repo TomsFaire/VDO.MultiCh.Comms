@@ -144,9 +144,9 @@ function channelOptions(selected, count = 16) {
 }
 
 function directorUrl(baseUrl, roomKey) {
+  // VDO.ninja: &director=ROOMNAME (room name is the param value, not a separate &room)
   const params = new URLSearchParams({
-    room: roomKey,
-    director: '1',
+    director: roomKey,
     vd: '0',
     ad: '0',
     channelCount: '1',
@@ -155,8 +155,8 @@ function directorUrl(baseUrl, roomKey) {
     compressor: '0',
     autoGain: '0',
     label: config.instance_name || 'Director',
-    notify: '1',           // audio alert when guests join/leave
-    showconnections: '1',  // show P2P connection status per guest
+    notify: '1',
+    showconnections: '1',
   });
   return `${baseUrl}/?${params}`;
 }
