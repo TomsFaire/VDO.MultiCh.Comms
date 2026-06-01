@@ -16,11 +16,26 @@ struct Config {
     sample_rate: Option<u32>,
 }
 
-/// Message format between shim and Electron
+/// Outbound: audio PCM frame for one channel
 #[derive(Debug, Serialize, Deserialize)]
 struct AudioFrame {
     channel_id: usize,
     samples: Vec<f32>,
+}
+
+/// Outbound: device list sent on connect
+#[derive(Debug, Serialize)]
+struct DevicesMsg {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    devices: Vec<String>,
+}
+
+/// Inbound: control messages from Electron
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ControlMsg {
+    ListDevices,
 }
 
 #[tokio::main]
@@ -75,6 +90,15 @@ async fn handle_client(
 
     let (mut sender, mut receiver) = ws.split();
 
+    // Send device list immediately on connect
+    let devices_msg = serde_json::to_string(&DevicesMsg {
+        msg_type: "devices",
+        devices: audio::list_devices(),
+    }).unwrap();
+    if sender.send(Message::Text(devices_msg)).await.is_err() {
+        return;
+    }
+
     // Spawn a task that drains capture rings and sends frames to the client
     let cap_task = {
         let cap = cap_consumers.clone();
@@ -106,14 +130,27 @@ async fn handle_client(
         })
     };
 
-    // Receive playback frames from the client and push into playback rings
+    // Receive messages from Electron: audio playback frames or control
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(text) = msg {
+            // Try audio frame first (has channel_id + samples), then control
             if let Ok(frame) = serde_json::from_str::<AudioFrame>(&text) {
                 if frame.channel_id < CHANNEL_COUNT {
                     let mut prods = pb_producers.lock().unwrap();
                     for s in &frame.samples {
                         let _ = prods[frame.channel_id].push(*s);
+                    }
+                }
+            } else if let Ok(ctrl) = serde_json::from_str::<ControlMsg>(&text) {
+                match ctrl {
+                    ControlMsg::ListDevices => {
+                        let reply = serde_json::to_string(&DevicesMsg {
+                            msg_type: "devices",
+                            devices: audio::list_devices(),
+                        }).unwrap();
+                        if sender.send(Message::Text(reply)).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }

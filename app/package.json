@@ -4,14 +4,13 @@
   "description": "Multi-channel IP intercom via VDO.ninja + CPAL audio shim",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "build": "electron-builder"
+    "start": "electron ."
   },
   "devDependencies": {
-    "electron": "^29.0.0",
-    "electron-builder": "^24.0.0"
+    "electron": "^42.3.0"
   },
   "dependencies": {
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "qrcode": "^1.5.4"
   }
 }

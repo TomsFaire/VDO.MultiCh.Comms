@@ -33,6 +33,8 @@ cd vdo.ninja
 # Serve with nginx, Caddy, or any static host
 ```
 
+Remote mobile users join via `{vdo_base_url}/comms` — ensure your instance serves that path (it's included in the standard VDO.ninja repo).
+
 **nginx example (`/etc/nginx/sites-available/vdo`):**
 ```nginx
 server {

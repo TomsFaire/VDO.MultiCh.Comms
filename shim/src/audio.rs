@@ -19,6 +19,13 @@ pub struct AudioStreams {
     _output: cpal::Stream,
 }
 
+pub fn list_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
 pub fn start(device_substr: &str, sample_rate: u32) -> Result<(AudioChannels, AudioStreams)> {
     let host = cpal::default_host();
     let device = find_device(&host, device_substr)?;
@@ -90,13 +97,7 @@ pub fn start(device_substr: &str, sample_rate: u32) -> Result<(AudioChannels, Au
     Ok((
         AudioChannels {
             capture_consumers: cap_consumers,
-            playback_producers: {
-                // unwrap the mutex — single owner from here
-                Arc::try_unwrap(pb_producers)
-                    .unwrap()
-                    .into_inner()
-                    .unwrap()
-            },
+            playback_producers: pb_producers,
         },
         AudioStreams {
             _input: input_stream,

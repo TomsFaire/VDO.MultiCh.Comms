@@ -13,15 +13,15 @@ const DEFAULT_CONFIG = {
   audio_device: '',
   sample_rate: 48000,
   lines: [
-    { id: 0, name: 'PL1', room_key: 'pl1-' + randomKey(), input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0 },
-    { id: 1, name: 'PL2', room_key: 'pl2-' + randomKey(), input_channel: 1, output_channel: 1, gain_in: 1.0, gain_out: 1.0 },
-    { id: 2, name: 'PL3', room_key: 'pl3-' + randomKey(), input_channel: 2, output_channel: 2, gain_in: 1.0, gain_out: 1.0 },
-    { id: 3, name: 'PL4', room_key: 'pl4-' + randomKey(), input_channel: 3, output_channel: 3, gain_in: 1.0, gain_out: 1.0 },
+    { id: 0, name: 'PL1', room_key: 'pl1' + randomKey(), input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0 },
+    { id: 1, name: 'PL2', room_key: 'pl2' + randomKey(), input_channel: 1, output_channel: 1, gain_in: 1.0, gain_out: 1.0 },
+    { id: 2, name: 'PL3', room_key: 'pl3' + randomKey(), input_channel: 2, output_channel: 2, gain_in: 1.0, gain_out: 1.0 },
+    { id: 3, name: 'PL4', room_key: 'pl4' + randomKey(), input_channel: 3, output_channel: 3, gain_in: 1.0, gain_out: 1.0 },
   ],
 };
 
 function randomKey() {
-  return Math.random().toString(36).slice(2, 8);
+  return Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(0, 6);
 }
 
 function loadConfig() {
