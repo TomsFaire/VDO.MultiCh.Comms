@@ -181,6 +181,7 @@ function directorUrl(baseUrl, roomKey) {
 function joinUrl(line) {
   const params = new URLSearchParams({
     room: line.room_key,
+    webcam: '1',          // join as mic/webcam participant (required for autostart to work)
     vd: '0',              // no video device
     videodevice: '0',     // no camera
     autostart: '1',       // auto-join without clicking Start (essential for hidden view)
