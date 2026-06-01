@@ -22,16 +22,70 @@ pub struct DeviceInfo {
     pub channels: u16,
 }
 
+fn probe_max_input_channels(device: &cpal::Device, sample_rate: u32) -> u16 {
+    for &count in &[32u16, 16, 8, 4, 2, 1] {
+        let config = cpal::StreamConfig {
+            channels: count,
+            sample_rate: cpal::SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let result = device.build_input_stream(
+            &config,
+            |_data: &[f32], _| {},
+            |_| {},
+            None,
+        );
+        if result.is_ok() {
+            return count;
+        }
+    }
+    1
+}
+
+fn probe_max_output_channels(device: &cpal::Device, sample_rate: u32) -> u16 {
+    for &count in &[32u16, 16, 8, 4, 2, 1] {
+        let config = cpal::StreamConfig {
+            channels: count,
+            sample_rate: cpal::SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let result = device.build_output_stream(
+            &config,
+            |_data: &mut [f32], _| {},
+            |_| {},
+            None,
+        );
+        if result.is_ok() {
+            return count;
+        }
+    }
+    1
+}
+
 fn max_input_channels(device: &cpal::Device) -> u16 {
-    device.supported_input_configs()
-        .map(|cfgs| cfgs.map(|c| c.channels()).max().unwrap_or(1))
-        .unwrap_or(1)
+    let from_configs = device.supported_input_configs()
+        .ok()
+        .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
+        .unwrap_or(0);
+
+    if from_configs > 2 {
+        return from_configs;
+    }
+    // supported_input_configs() may underreport on macOS CoreAudio — probe directly
+    probe_max_input_channels(device, 48000)
 }
 
 fn max_output_channels(device: &cpal::Device) -> u16 {
-    device.supported_output_configs()
-        .map(|cfgs| cfgs.map(|c| c.channels()).max().unwrap_or(1))
-        .unwrap_or(1)
+    let from_configs = device.supported_output_configs()
+        .ok()
+        .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
+        .unwrap_or(0);
+
+    if from_configs > 2 {
+        return from_configs;
+    }
+    // supported_output_configs() may underreport on macOS CoreAudio — probe directly
+    probe_max_output_channels(device, 48000)
 }
 
 pub fn list_input_devices() -> Vec<DeviceInfo> {
