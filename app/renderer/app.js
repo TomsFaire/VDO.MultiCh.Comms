@@ -1,11 +1,13 @@
 let config = null;
 
-function showQrFallback(canvas, url) {
-  // Replace the canvas with a plain-text "QR unavailable" placeholder
-  const placeholder = document.createElement('div');
-  placeholder.style.cssText = 'width:120px;height:120px;display:flex;align-items:center;justify-content:center;background:#2a2a2a;border-radius:4px;font-size:11px;color:#888;text-align:center;padding:8px;';
-  placeholder.textContent = 'QR unavailable';
-  canvas.parentNode.replaceChild(placeholder, canvas);
+async function renderQr(id, url) {
+  const img = document.getElementById(`qr-${id}`);
+  if (!img) return;
+  try {
+    img.src = await window.api.generateQr(url);
+  } catch (_) {
+    img.alt = 'QR unavailable';
+  }
 }
 let shimDevices = []; // device names received from shim on connect
 const lineStates = {}; // { [id]: { connected: boolean } }
@@ -136,7 +138,7 @@ function renderLines() {
         <span id="gain-out-val-${line.id}">${line.gain_out.toFixed(2)}</span>
       </div>
       <div class="join-section">
-        <canvas id="qr-${line.id}" width="120" height="120"></canvas>
+        <img class="qr" id="qr-${line.id}" alt="QR code" />
         <div class="copy-row">
           <input type="text" readonly value="${joinUrl(line)}" id="join-${line.id}" />
           <button onclick="copyJoinLink(${line.id})">Copy</button>
@@ -148,20 +150,8 @@ function renderLines() {
     container.appendChild(panel);
   });
 
-  // QR codes — guarded so a missing/broken QRCode library doesn't crash init
-  config.lines.forEach((line) => {
-    const canvas = document.getElementById(`qr-${line.id}`);
-    if (!canvas) return;
-    if (typeof QRCode !== 'undefined') {
-      try {
-        QRCode.toCanvas(canvas, joinUrl(line), { width: 120, margin: 1, color: { dark: '#000', light: '#fff' } });
-      } catch (err) {
-        showQrFallback(canvas, joinUrl(line));
-      }
-    } else {
-      showQrFallback(canvas, joinUrl(line));
-    }
-  });
+  // QR codes — generated in main process via IPC (qrcode is Node-only, no browser bundle)
+  config.lines.forEach((line) => renderQr(line.id, joinUrl(line)));
 
   // Channel select listeners
   document.querySelectorAll('select[data-line]').forEach((el) => {
@@ -297,11 +287,7 @@ function setupSettings() {
       const input = document.getElementById(`join-${line.id}`);
       if (input) input.value = url;
       const canvas = document.getElementById(`qr-${line.id}`);
-      if (canvas && typeof QRCode !== 'undefined') {
-        try {
-          QRCode.toCanvas(canvas, url, { width: 120, margin: 1, color: { dark: '#000', light: '#fff' } });
-        } catch (_) { /* QR generation failed, leave as-is */ }
-      }
+      renderQr(line.id, url);
     });
   });
 }

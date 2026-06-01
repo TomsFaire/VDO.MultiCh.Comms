@@ -71,6 +71,10 @@ app.whenReady().then(() => {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   // IPC handlers
+  ipcMain.handle('generate-qr', async (_, text) => {
+    const QRCode = require('qrcode');
+    return QRCode.toDataURL(text, { width: 120, margin: 1 });
+  });
   ipcMain.handle('get-config', () => loadConfig());
   ipcMain.handle('save-config', (_, cfg) => { saveConfig(cfg); return true; });
   ipcMain.handle('test-vdo-url', async (_, url) => {
