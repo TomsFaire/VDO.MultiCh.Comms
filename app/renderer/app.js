@@ -181,13 +181,13 @@ function directorUrl(baseUrl, roomKey) {
 function joinUrl(line) {
   const params = new URLSearchParams({
     room: line.room_key,
-    vd: '0',
-    videodevice: '0',
-    audio: '1',
+    vd: '0',              // no video device
+    videodevice: '0',     // no camera
+    autostart: '1',       // auto-join without clicking Start (essential for hidden view)
     label: line.location || line.name,
-    labelsuggestion: '1', // prompt for name if location not set
-    monomic: '1',         // force mono mic — correct for party line
-    proaudio: '1',        // bypass browser noise suppression aggressively
+    labelsuggestion: '1',
+    monomic: '1',
+    proaudio: '1',
     noisetgate: '0',
     compressor: '0',
     autoGain: '0',

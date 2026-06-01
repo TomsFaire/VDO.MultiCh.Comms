@@ -108,9 +108,17 @@ app.whenReady().then(() => {
       },
     });
 
-    // 0×0 at position 0,0 — invisible but fully active (WebRTC runs normally)
+    // Grant mic permission on this view's session too
+    view.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
+      callback(permission === 'media' || permission === 'microphone');
+    });
+    view.webContents.session.setPermissionCheckHandler((wc, permission) => {
+      return permission === 'media' || permission === 'microphone';
+    });
+
+    // 1×1 off-screen — must be non-zero for Chromium to activate WebRTC
     mainWin.contentView.addChildView(view);
-    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    view.setBounds({ x: -2, y: -2, width: 1, height: 1 });
 
     view.webContents.loadURL(url);
     lineViews.set(id, view);
