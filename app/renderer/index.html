@@ -105,7 +105,7 @@
     #setup-join-section { display: none; flex-direction: column; gap: 10px; }
     #setup-join-section.visible { display: flex; }
     #setup-step-2 { display: none; }
-    #setup-step-2.visible { display: flex; }
+    #setup-step-2.visible { display: flex; flex-direction: column; gap: 16px; }
     .setup-field-row { display: flex; flex-direction: column; gap: 6px; }
     .setup-field-row label { font-size: 12px; color: #aaa; }
     .setup-field-row input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 8px 10px; border-radius: 4px; font-size: 14px; }
@@ -153,7 +153,7 @@
       </div>
 
       <!-- Step 2: name your session and lines -->
-      <div id="setup-step-2" style="display:none;flex-direction:column;gap:16px;">
+      <div id="setup-step-2">
         <h2>Name your session</h2>
         <p>This becomes the prefix for all room keys — use something short and event-specific.</p>
         <div class="setup-field-row">
