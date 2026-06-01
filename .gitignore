@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.*.local
+.claude/plans/
+target/
+node_modules/
+dist/
+out/
+*.log

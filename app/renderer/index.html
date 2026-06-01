@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VDO.MultiCh.Comms</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: #111; border-bottom: 1px solid #333; }
+    header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+    header button { background: #333; border: none; color: #ccc; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    header button:hover { background: #444; }
+
+    #lines { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px; flex: 1; }
+
+    .line-panel { background: #242424; border: 1px solid #333; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .line-panel h2 { font-size: 14px; font-weight: 600; }
+    .line-panel .room-key { font-size: 11px; color: #888; font-family: monospace; }
+
+    .meter { height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
+    .meter-bar { height: 100%; width: 0%; background: #4caf50; transition: width 0.1s; border-radius: 4px; }
+
+    .gain-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #aaa; }
+    .gain-row input[type=range] { flex: 1; accent-color: #4caf50; }
+
+    .join-link { display: flex; align-items: center; gap: 6px; }
+    .join-link input { flex: 1; font-size: 11px; background: #1a1a1a; border: 1px solid #333; color: #aaa; padding: 4px 8px; border-radius: 4px; font-family: monospace; }
+    .join-link button { font-size: 11px; background: #333; border: none; color: #ccc; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+    .join-link button:hover { background: #444; }
+
+    .connect-btn { padding: 8px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; background: #2a5c2a; color: #7ec87e; transition: background 0.2s; }
+    .connect-btn.connected { background: #5c2a2a; color: #c87e7e; }
+    .connect-btn:hover { filter: brightness(1.2); }
+
+    /* Settings overlay */
+    #settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 100; }
+    #settings-overlay.open { display: flex; }
+    .settings-box { background: #242424; border: 1px solid #333; border-radius: 10px; padding: 24px; width: 420px; display: flex; flex-direction: column; gap: 16px; }
+    .settings-box h2 { font-size: 15px; font-weight: 600; }
+    .settings-row { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+    .settings-row label { color: #aaa; }
+    .settings-row select, .settings-row input[type=text] { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 8px; border-radius: 4px; font-size: 13px; }
+    .settings-row .url-row { display: flex; gap: 6px; }
+    .settings-row .url-row input { flex: 1; }
+    .test-btn { background: #333; border: none; color: #ccc; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+    .test-btn:hover { background: #444; }
+    .test-status { font-size: 11px; min-height: 16px; }
+    .test-status.ok { color: #4caf50; }
+    .test-status.fail { color: #f44336; }
+    .settings-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .settings-actions button { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; }
+    .btn-save { background: #2a5c2a; color: #7ec87e; }
+    .btn-cancel { background: #333; color: #ccc; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>VDO.MultiCh.Comms</h1>
+    <button id="open-settings">Settings</button>
+  </header>
+
+  <div id="lines"></div>
+
+  <div id="settings-overlay">
+    <div class="settings-box">
+      <h2>Settings</h2>
+      <div class="settings-row">
+        <label>VDO.ninja endpoint</label>
+        <select id="vdo-preset">
+          <option value="https://vdo.ninja">VDO.ninja (public)</option>
+          <option value="custom">Custom instance</option>
+        </select>
+      </div>
+      <div class="settings-row" id="custom-url-row" style="display:none">
+        <label>Custom URL</label>
+        <div class="url-row">
+          <input type="text" id="vdo-custom-url" placeholder="https://your-domain.com/live" />
+          <button class="test-btn" id="test-url-btn">Test</button>
+        </div>
+        <div class="test-status" id="test-status"></div>
+      </div>
+      <div class="settings-actions">
+        <button class="btn-cancel" id="cancel-settings">Cancel</button>
+        <button class="btn-save" id="save-settings">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

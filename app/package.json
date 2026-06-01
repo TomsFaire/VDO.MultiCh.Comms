@@ -1,0 +1,17 @@
+{
+  "name": "vdo-multichan-comms",
+  "version": "0.1.0",
+  "description": "Multi-channel IP intercom via VDO.ninja + CPAL audio shim",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
