@@ -58,4 +58,4 @@ If the shim bridge injected correctly (check DevTools console for `[shim-bridge]
 - Device enumeration (CPAL channel count probe for BlackHole-style virtual devices)
 - Channel dropdowns reflect actual hardware channel count
 - Room keys are permanent — renaming a line does not change its room
-- Port 9696 cleanup on app restart
+- Port 9696 cleanup on app restart (`lsof -s tcp:LISTEN` targets only the shim's listening socket; Chromium client connections are no longer matched, eliminating the crash loop on shim restart — fixed build 22)
