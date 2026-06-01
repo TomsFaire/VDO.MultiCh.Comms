@@ -12,7 +12,8 @@ use tracing::info;
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    audio_device: Option<String>,
+    input_device: Option<String>,
+    output_device: Option<String>,
     sample_rate: Option<u32>,
 }
 
@@ -23,12 +24,13 @@ struct AudioFrame {
     samples: Vec<f32>,
 }
 
-/// Outbound: device list sent on connect
+/// Outbound: device lists sent on connect
 #[derive(Debug, Serialize)]
 struct DevicesMsg {
     #[serde(rename = "type")]
     msg_type: &'static str,
-    devices: Vec<String>,
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
 }
 
 /// Inbound: control messages from Electron
@@ -48,17 +50,18 @@ async fn main() -> Result<()> {
 
     let cfg: Config = if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)?;
-        serde_json::from_str(&raw).unwrap_or(Config { audio_device: None, sample_rate: None })
+        serde_json::from_str(&raw).unwrap_or(Config { input_device: None, output_device: None, sample_rate: None })
     } else {
-        Config { audio_device: None, sample_rate: None }
+        Config { input_device: None, output_device: None, sample_rate: None }
     };
 
-    let device_substr = cfg.audio_device.unwrap_or_default();
+    let input_device = cfg.input_device.unwrap_or_default();
+    let output_device = cfg.output_device.unwrap_or_default();
     let sample_rate = cfg.sample_rate.unwrap_or(48000);
 
-    info!("Starting audio shim — device: '{device_substr}', rate: {sample_rate}Hz");
+    info!("Starting audio shim — in: '{input_device}', out: '{output_device}', rate: {sample_rate}Hz");
 
-    let (mut channels, _streams) = audio::start(&device_substr, sample_rate)?;
+    let (mut channels, _streams) = audio::start(&input_device, &output_device, sample_rate)?;
 
     // Share capture consumers and playback producers across WS clients
     let cap_consumers = Arc::new(Mutex::new(channels.capture_consumers));
@@ -88,20 +91,23 @@ async fn handle_client(
         Err(e) => { tracing::warn!("WS handshake failed: {e}"); return; }
     };
 
-    let (mut sender, mut receiver) = ws.split();
+    let (sender, mut receiver) = ws.split();
+    let sender = Arc::new(tokio::sync::Mutex::new(sender));
 
     // Send device list immediately on connect
     let devices_msg = serde_json::to_string(&DevicesMsg {
         msg_type: "devices",
-        devices: audio::list_devices(),
+        input_devices: audio::list_input_devices(),
+        output_devices: audio::list_output_devices(),
     }).unwrap();
-    if sender.send(Message::Text(devices_msg)).await.is_err() {
+    if sender.lock().await.send(Message::Text(devices_msg)).await.is_err() {
         return;
     }
 
     // Spawn a task that drains capture rings and sends frames to the client
     let cap_task = {
         let cap = cap_consumers.clone();
+        let sender = sender.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(
                 std::time::Duration::from_millis(10), // 10ms = FRAME_SIZE @ 48kHz
@@ -122,7 +128,7 @@ async fn handle_client(
                 };
                 for frame in frames {
                     let json = serde_json::to_string(&frame).unwrap();
-                    if sender.send(Message::Text(json)).await.is_err() {
+                    if sender.lock().await.send(Message::Text(json)).await.is_err() {
                         return;
                     }
                 }
@@ -146,9 +152,10 @@ async fn handle_client(
                     ControlMsg::ListDevices => {
                         let reply = serde_json::to_string(&DevicesMsg {
                             msg_type: "devices",
-                            devices: audio::list_devices(),
+                            input_devices: audio::list_input_devices(),
+                            output_devices: audio::list_output_devices(),
                         }).unwrap();
-                        if sender.send(Message::Text(reply)).await.is_err() {
+                        if sender.lock().await.send(Message::Text(reply)).await.is_err() {
                             break;
                         }
                     }

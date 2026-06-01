@@ -22,8 +22,9 @@ function connectShim() {
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'devices') {
-        shimDevices = msg.devices;
-        populateDeviceDropdown(document.getElementById('audio-device-select'), shimDevices);
+        shimDevices = { inputs: msg.input_devices || [], outputs: msg.output_devices || [] };
+        populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
+        populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
       }
     } catch (_) { /* audio frames — ignore for now */ }
   });
@@ -32,31 +33,29 @@ function connectShim() {
   });
 }
 
-function populateDeviceDropdown(select, devices) {
+function populateDeviceDropdown(select, devices, configKey) {
   if (!select) return;
-  select.innerHTML = '<option value="">Default device</option>';
+  select.innerHTML = '<option value="">Default</option>';
   devices.forEach((name) => {
     const opt = document.createElement('option');
     opt.value = name;
     opt.textContent = name;
-    if (name === config?.audio_device) opt.selected = true;
+    if (name === config?.[configKey]) opt.selected = true;
     select.appendChild(opt);
   });
 }
 
-// Enumerate audio input devices via Web Audio API — works without the shim
+// Enumerate audio devices via Web Audio API — works without the shim
 async function enumerateAudioDevices() {
   try {
     // Request mic permission so device labels are populated (Chromium hides labels without it)
     await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop()));
     const all = await navigator.mediaDevices.enumerateDevices();
-    const seen = new Set();
-    return all
-      .filter(d => (d.kind === 'audioinput' || d.kind === 'audiooutput') && d.label)
-      .map(d => d.label)
-      .filter(label => seen.has(label) ? false : seen.add(label));
+    const inputs = [...new Set(all.filter(d => d.kind === 'audioinput' && d.label).map(d => d.label))];
+    const outputs = [...new Set(all.filter(d => d.kind === 'audiooutput' && d.label).map(d => d.label))];
+    return { inputs, outputs };
   } catch (_) {
-    return [];
+    return { inputs: [], outputs: [] };
   }
 }
 
@@ -64,7 +63,10 @@ async function enumerateAudioDevices() {
 
 function updateDeviceLabel() {
   const label = document.getElementById('device-label');
-  if (label) label.textContent = config.audio_device ? `Device: ${config.audio_device}` : 'Device: Default';
+  if (!label) return;
+  const i = config.input_device || 'Default';
+  const o = config.output_device || 'Default';
+  label.textContent = `In: ${i} / Out: ${o}`;
 }
 
 async function init() {
@@ -73,9 +75,10 @@ async function init() {
   updateDeviceLabel();
   renderLines();
   setupSettings();
-  // Populate device list immediately from Web Audio API — shim may not be running yet
+  // Populate device lists immediately from Web Audio API — shim may not be running yet
   shimDevices = await enumerateAudioDevices();
-  populateDeviceDropdown(document.getElementById('audio-device-select'), shimDevices);
+  populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
+  populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
 }
 
 function channelOptions(selected, count = 16) {
@@ -247,7 +250,8 @@ function setupSettings() {
     testStatus.textContent = '';
     // Re-enumerate on open so newly connected devices appear
     shimDevices = await enumerateAudioDevices();
-    populateDeviceDropdown(document.getElementById('audio-device-select'), shimDevices);
+    populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
+    populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
     overlay.classList.add('open');
   });
 
@@ -276,8 +280,8 @@ function setupSettings() {
   });
 
   document.getElementById('save-settings').addEventListener('click', async () => {
-    const devSelect = document.getElementById('audio-device-select');
-    config.audio_device = devSelect.value;
+    config.input_device = document.getElementById('input-device-select').value;
+    config.output_device = document.getElementById('output-device-select').value;
     const isCustom = preset.value === 'custom';
     config.vdo_base_url = isCustom ? customUrl.value.trim() : 'https://vdo.ninja';
     await window.api.saveConfig(config);

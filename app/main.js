@@ -10,7 +10,8 @@ const SHIM_BIN = path.join(__dirname, '..', 'shim', 'target', 'release', 'shim')
 const DEFAULT_CONFIG = {
   instance_name: 'default',
   vdo_base_url: 'https://vdo.ninja',
-  audio_device: '',
+  input_device: '',
+  output_device: '',
   sample_rate: 48000,
   lines: [
     { id: 0, name: 'PL1', room_key: 'pl1' + randomKey(), input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0 },
