@@ -19,13 +19,16 @@ const lineStates = {}; // { [id]: { connected: boolean } }
 let shimWs = null;
 
 function connectShim() {
-  shimWs = new WebSocket('ws://127.0.0.1:9696');
-  shimWs.addEventListener('message', (e) => {
+  const ws = new WebSocket('ws://127.0.0.1:9696');
+  // Close immediately after receiving the device list — this connection is
+  // only for the JSON device enumeration. Staying open drains the audio ring
+  // buffer that the shim bridge preload needs for audio frames.
+  ws.addEventListener('message', (e) => {
     try {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'devices' && config) {
-        // Shim sends names only — merge with deviceIds from Web Audio API enumeration
-        // Merge shim entries (have channels) with Web Audio entries (have deviceId)
+      if (msg.msg_type === 'devices') {
+        ws.close();
+        if (!config) return;
         const merge = (shimEntries, existing) => shimEntries.map(e => ({
           name: e.name,
           channels: e.channels,
@@ -40,17 +43,18 @@ function connectShim() {
         };
         populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
         populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
-        // Shim has accurate channel counts — update dropdowns now
         const c = queryChannelCounts(config.input_device, config.output_device);
         inputChannelCount = c.inCount;
         outputChannelCount = c.outCount;
         updateChannelDropdowns();
       }
-    } catch (_) { /* audio frames — ignore for now */ }
+    } catch (_) { /* binary audio frame — not for this connection */ }
   });
-  shimWs.addEventListener('close', () => {
-    setTimeout(connectShim, 2000); // reconnect if shim restarts
+  ws.addEventListener('close', (e) => {
+    // Only retry if this was an unexpected close (not our own ws.close())
+    if (e.code !== 1000) setTimeout(connectShim, 2000);
   });
+  ws.addEventListener('error', () => setTimeout(connectShim, 2000));
 }
 
 // devices is [{name, deviceId}] or [string] — normalises both

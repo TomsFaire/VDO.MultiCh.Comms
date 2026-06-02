@@ -39,31 +39,34 @@ function buildShimScript(channelId) {
         class ShimProcessor extends AudioWorkletProcessor {
           constructor() {
             super();
-            // Ring buffer: 8 frames × 480 samples = 3840 samples (80ms at 48kHz)
-            const CAP = 3840;
+            // 2-second ring buffer — large enough to absorb tokio scheduler jitter
+            // and WebSocket write latency without underrunning.
+            const CAP = 96000;
             this._buf = new Float32Array(CAP);
-            this._head = 0; // read pointer
-            this._tail = 0; // write pointer
-            this._size = 0; // occupied samples
+            this._head = 0;
+            this._tail = 0;
+            this._size = 0;
             this._cap = CAP;
-            this._ready = false; // hold output until 4 frames (1920 samples = 40ms) buffered
+            // Hold 500ms before starting output — gives the ring time to fill
+            // past the point where scheduler jitter can drain it.
+            this._ready = false;
             this._underruns = 0;
             this.port.onmessage = (e) => {
-              const data = e.data; // Float32Array slice
+              const data = e.data;
               for (let i = 0; i < data.length; i++) {
                 if (this._size < this._cap) {
                   this._buf[this._tail] = data[i];
                   this._tail = (this._tail + 1) % this._cap;
                   this._size++;
                 }
-                // if full, drop the sample (back-pressure)
               }
-              if (!this._ready && this._size >= 1920) this._ready = true;
+              if (!this._ready && this._size >= 24000) this._ready = true;
             };
           }
           process(inputs, outputs) {
             const out = outputs[0][0];
             if (!this._ready) { out.fill(0); return true; }
+            let hadUnderrun = false;
             for (let i = 0; i < out.length; i++) {
               if (this._size > 0) {
                 out[i] = this._buf[this._head];
@@ -71,10 +74,13 @@ function buildShimScript(channelId) {
                 this._size--;
               } else {
                 out[i] = 0;
-                this._underruns++;
-                if (this._underruns % 128 === 1) {
-                  this.port.postMessage({ underrun: true, count: this._underruns });
-                }
+                hadUnderrun = true;
+              }
+            }
+            if (hadUnderrun) {
+              this._underruns++;
+              if (this._underruns % 50 === 1) {
+                this.port.postMessage({ underrun: true, count: this._underruns });
               }
             }
             return true;
@@ -119,15 +125,19 @@ function buildShimScript(channelId) {
 
       ws.binaryType = 'arraybuffer';
       ws.onmessage = (e) => {
-        if (e.data instanceof ArrayBuffer) {
-          const view = new DataView(e.data);
-          const channelId = view.getUint32(0, true);
-          if (channelId === CHANNEL_ID) {
-            const samples = new Float32Array(e.data, 4);
-            node.port.postMessage(samples);
+        if (!(e.data instanceof ArrayBuffer)) return;
+        // Multi-channel packet: [ch: u32 LE][n_samples: u32 LE][samples: f32[] LE] × N
+        const dv = new DataView(e.data);
+        let offset = 0;
+        while (offset + 8 <= e.data.byteLength) {
+          const ch = dv.getUint32(offset, true);
+          const n  = dv.getUint32(offset + 4, true);
+          offset += 8;
+          if (offset + n * 4 > e.data.byteLength) break;
+          if (ch === CHANNEL_ID) {
+            node.port.postMessage(new Float32Array(e.data, offset, n));
           }
-        } else {
-          // text frames are JSON control messages (device list etc.) — ignore for audio
+          offset += n * 4;
         }
       };
 
@@ -188,6 +198,8 @@ function saveConfig(cfg) {
 let shimProcess = null;
 // Map of line id → WebContentsView for active VDO.ninja connections
 const lineViews = new Map();
+// Track connect args so lines can be reconnected after a shim restart
+const lineConfigs = new Map(); // id → { url, channelId }
 let mainWin = null;
 
 // Capture first-run state before loadConfig() creates the file
@@ -218,6 +230,37 @@ function killPortAndStartShim() {
       shimProcess.stderr.on('data', d => process.stderr.write('[shim] ' + d));
       shimProcess.on('error', err => console.error('[shim] spawn error:', err.message));
       shimProcess.on('exit', (code, sig) => console.log(`[shim] exited code=${code} sig=${sig}`));
+      // Reconnect all active lines so their preloads get a fresh WebSocket to the new shim.
+      // Wait 1s for the shim to finish binding its WebSocket port before reconnecting.
+      if (lineConfigs.size > 0) {
+        setTimeout(() => {
+          console.log(`[shim] reconnecting ${lineConfigs.size} active line(s) to new shim`);
+          for (const [id, cfg] of lineConfigs) {
+            const view = lineViews.get(id);
+            if (view) {
+              mainWin.contentView.removeChildView(view);
+              try { fs.unlinkSync(path.join(app.getPath('temp'), `shim-preload-${id}.js`)); } catch (_) {}
+              view.webContents.close();
+              lineViews.delete(id);
+            }
+            // Reconnect: reuse the same session so VDO.ninja stays logged in,
+            // but write a fresh preload so the new WebSocket is opened.
+            const preloadPath = path.join(app.getPath('temp'), `shim-preload-${id}.js`);
+            fs.writeFileSync(preloadPath, buildShimScript(cfg.channelId ?? 0));
+            const lineSes = session.fromPartition(`persist:line-${id}`);
+            lineSes.setPreloads([preloadPath]);
+            const view2 = new WebContentsView({
+              webPreferences: { session: lineSes, contextIsolation: false, autoplayPolicy: 'no-user-gesture-required' },
+            });
+            view2.webContents.setAudioMuted(false);
+            mainWin.contentView.addChildView(view2);
+            view2.setBounds({ x: -400, y: -400, width: 320, height: 240 });
+            view2.webContents.loadURL(cfg.url);
+            lineViews.set(id, view2);
+            console.log(`Line ${id} ch${cfg.channelId} reconnected after shim restart`);
+          }
+        }, 1000);
+      }
     }, 300);
   });
 }
@@ -305,7 +348,9 @@ app.whenReady().then(() => {
     view.setBounds({ x: -400, y: -400, width: 320, height: 240 });
 
     view.webContents.loadURL(url);
+    view.webContents.openDevTools({ mode: 'detach' }); // TEMP: shim bridge diagnostics
     lineViews.set(id, view);
+    lineConfigs.set(id, { url, channelId: channelId ?? 0 });
     console.log(`Line ${id} ch${channelId} connected: ${url}`);
   });
 
@@ -317,6 +362,7 @@ app.whenReady().then(() => {
     try { fs.unlinkSync(path.join(app.getPath('temp'), `shim-preload-${id}.js`)); } catch (_) {}
     view.webContents.close();
     lineViews.delete(id);
+    lineConfigs.delete(id);
     console.log(`Line ${id} disconnected`);
   });
 

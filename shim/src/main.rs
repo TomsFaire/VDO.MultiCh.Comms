@@ -1,12 +1,13 @@
 mod audio;
 
 use anyhow::Result;
-use audio::{CHANNEL_COUNT, FRAME_SIZE};
+use audio::CHANNEL_COUNT;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::info;
 
@@ -69,8 +70,7 @@ async fn main() -> Result<()> {
 
     let (mut channels, _streams) = audio::start(&input_device, &output_device, sample_rate)?;
 
-    // Share capture consumers and playback producers across WS clients
-    let cap_consumers = Arc::new(Mutex::new(channels.capture_consumers));
+    let frame_tx = channels.frame_tx;
     let pb_producers = Arc::new(Mutex::new(channels.playback_producers));
 
     let addr: SocketAddr = "127.0.0.1:9696".parse()?;
@@ -79,9 +79,9 @@ async fn main() -> Result<()> {
 
     while let Ok((stream, peer)) = listener.accept().await {
         info!("Client connected: {peer}");
-        let cap = cap_consumers.clone();
         let pb = pb_producers.clone();
-        tokio::spawn(handle_client(stream, cap, pb));
+        let frame_rx = frame_tx.subscribe();
+        tokio::spawn(handle_client(stream, frame_rx, pb));
     }
 
     Ok(())
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
 
 async fn handle_client(
     stream: TcpStream,
-    cap_consumers: Arc<Mutex<Vec<ringbuf::HeapConsumer<f32>>>>,
+    mut frame_rx: broadcast::Receiver<Vec<u8>>,
     pb_producers: Arc<Mutex<Vec<ringbuf::HeapProducer<f32>>>>,
 ) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
@@ -110,39 +110,22 @@ async fn handle_client(
         return;
     }
 
-    // Spawn a task that drains capture rings and sends frames to the client
+    // Forward audio frames as they arrive from the CPAL broadcast channel.
+    // No timer — dispatch is driven by the hardware audio clock via the CPAL callback.
     let cap_task = {
-        let cap = cap_consumers.clone();
         let sender = sender.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_millis(10), // 10ms = FRAME_SIZE @ 48kHz
-            );
             loop {
-                interval.tick().await;
-                let frames: Vec<AudioFrame> = {
-                    let mut cons = cap.lock().unwrap();
-                    (0..CHANNEL_COUNT)
-                        .map(|ch| {
-                            let mut samples = Vec::with_capacity(FRAME_SIZE);
-                            for _ in 0..FRAME_SIZE {
-                                samples.push(cons[ch].pop().unwrap_or(0.0));
-                            }
-                            AudioFrame { channel_id: ch, samples }
-                        })
-                        .collect()
-                };
-                // Binary frame: 4 bytes channel_id (u32 LE) + samples as f32 LE
-                // ~1.9 KB vs ~15 KB JSON — eliminates parse jitter in the bridge.
-                for frame in frames {
-                    let mut buf = Vec::with_capacity(4 + frame.samples.len() * 4);
-                    buf.extend_from_slice(&(frame.channel_id as u32).to_le_bytes());
-                    for s in &frame.samples {
-                        buf.extend_from_slice(&s.to_le_bytes());
+                match frame_rx.recv().await {
+                    Ok(buf) => {
+                        if sender.lock().await.send(Message::Binary(buf.into())).await.is_err() {
+                            return;
+                        }
                     }
-                    if sender.lock().await.send(Message::Binary(buf.into())).await.is_err() {
-                        return;
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WS client lagged, dropped {n} audio frames");
                     }
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
         })

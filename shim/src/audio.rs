@@ -3,12 +3,19 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use ringbuf::{HeapConsumer, HeapProducer, HeapRb};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 pub const CHANNEL_COUNT: usize = 4;
 pub const FRAME_SIZE: usize = 480; // 10ms @ 48kHz
 
+// Broadcast capacity: 64 frames = ~640ms. Slow receivers get dropped frames rather
+// than blocking the CPAL callback.
+pub const BROADCAST_CAP: usize = 64;
+
 pub struct AudioChannels {
-    pub capture_consumers: Vec<HeapConsumer<f32>>,
+    // Receives packed multi-channel audio frames built directly in the CPAL callback.
+    // Each WebSocket client subscribes independently — no shared consumer contention.
+    pub frame_tx: broadcast::Sender<Vec<u8>>,
     pub playback_producers: Vec<HeapProducer<f32>>,
 }
 
@@ -29,13 +36,7 @@ fn probe_max_input_channels(device: &cpal::Device, sample_rate: u32) -> u16 {
             sample_rate: cpal::SampleRate(sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
-        let result = device.build_input_stream(
-            &config,
-            |_data: &[f32], _| {},
-            |_| {},
-            None,
-        );
-        if result.is_ok() {
+        if device.build_input_stream(&config, |_: &[f32], _| {}, |_| {}, None).is_ok() {
             return count;
         }
     }
@@ -49,13 +50,7 @@ fn probe_max_output_channels(device: &cpal::Device, sample_rate: u32) -> u16 {
             sample_rate: cpal::SampleRate(sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
-        let result = device.build_output_stream(
-            &config,
-            |_data: &mut [f32], _| {},
-            |_| {},
-            None,
-        );
-        if result.is_ok() {
+        if device.build_output_stream(&config, |_: &mut [f32], _| {}, |_| {}, None).is_ok() {
             return count;
         }
     }
@@ -67,11 +62,7 @@ fn max_input_channels(device: &cpal::Device) -> u16 {
         .ok()
         .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
         .unwrap_or(0);
-
-    if from_configs > 2 {
-        return from_configs;
-    }
-    // supported_input_configs() may underreport on macOS CoreAudio — probe directly
+    if from_configs > 2 { return from_configs; }
     probe_max_input_channels(device, 48000)
 }
 
@@ -80,11 +71,7 @@ fn max_output_channels(device: &cpal::Device) -> u16 {
         .ok()
         .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
         .unwrap_or(0);
-
-    if from_configs > 2 {
-        return from_configs;
-    }
-    // supported_output_configs() may underreport on macOS CoreAudio — probe directly
+    if from_configs > 2 { return from_configs; }
     probe_max_output_channels(device, 48000)
 }
 
@@ -111,55 +98,76 @@ pub fn start(input_substr: &str, output_substr: &str, sample_rate: u32) -> Resul
     let input_dev = find_input_device(&host, input_substr)?;
     let output_dev = find_output_device(&host, output_substr)?;
 
-    // Use the device's actual channel count, capped at CHANNEL_COUNT.
-    // Opening with a hardcoded count on a 2-ch device produces garbled deinterleaving.
     let in_ch = (max_input_channels(&input_dev) as usize).min(CHANNEL_COUNT).max(1);
     let out_ch = (max_output_channels(&output_dev) as usize).min(CHANNEL_COUNT).max(1);
     tracing::info!("opening input with {in_ch} ch, output with {out_ch} ch");
 
-    // Request 480-sample (10ms) buffers for steady frame delivery.
-    // CoreAudio may round to the nearest supported size but will stay close.
-    // Using Default often yields 4096+ samples, causing bursty delivery and stutter.
     let in_config = StreamConfig {
         channels: in_ch as u16,
         sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+        buffer_size: cpal::BufferSize::Default,
     };
     let out_config = StreamConfig {
         channels: out_ch as u16,
         sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+        buffer_size: cpal::BufferSize::Default,
     };
 
-    let mut cap_producers: Vec<HeapProducer<f32>> = Vec::new();
-    let mut cap_consumers: Vec<HeapConsumer<f32>> = Vec::new();
+    // Playback path: ring buffers fed from WebSocket, drained by CPAL output callback.
     let mut pb_producers: Vec<HeapProducer<f32>> = Vec::new();
     let mut pb_consumers: Vec<HeapConsumer<f32>> = Vec::new();
-
     for _ in 0..CHANNEL_COUNT {
-        let rb = HeapRb::<f32>::new(FRAME_SIZE * 16);
-        let (p, c) = rb.split();
-        cap_producers.push(p);
-        cap_consumers.push(c);
-
-        let rb = HeapRb::<f32>::new(FRAME_SIZE * 16);
-        let (p, c) = rb.split();
+        let (p, c) = HeapRb::<f32>::new(FRAME_SIZE * 16).split();
         pb_producers.push(p);
         pb_consumers.push(c);
     }
-
-    let cap_producers = Arc::new(std::sync::Mutex::new(cap_producers));
     let pb_consumers = Arc::new(std::sync::Mutex::new(pb_consumers));
 
-    let cap_producers_clone = cap_producers.clone();
+    // Capture path: CPAL callback accumulates samples, packs a complete multi-channel
+    // frame when FRAME_SIZE samples per channel are ready, broadcasts to all WS clients.
+    // Each client gets its own receiver — no shared consumer contention.
+    let (frame_tx, _) = broadcast::channel::<Vec<u8>>(BROADCAST_CAP);
+    let frame_tx_clone = frame_tx.clone();
+
+    let logged_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let logged_once_clone = logged_once.clone();
+
+    // Per-channel accumulator — pre-allocated to avoid malloc in the audio callback.
+    // Max 2 frames of headroom per channel is enough since we drain when full.
+    let mut accum: Vec<Vec<f32>> = (0..in_ch)
+        .map(|_| { let mut v = Vec::new(); v.reserve(FRAME_SIZE * 2); v })
+        .collect();
+
     let input_stream = input_dev
         .build_input_stream(
             &in_config,
             move |data: &[f32], _| {
-                let mut prods = cap_producers_clone.lock().unwrap();
-                for (i, &sample) in data.iter().enumerate() {
-                    let ch = i % in_ch;  // deinterleave using actual device channel count
-                    let _ = prods[ch].push(sample);
+                if !logged_once_clone.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!(
+                        "CPAL input callback: {} interleaved samples = {} per channel",
+                        data.len(), data.len() / in_ch
+                    );
+                }
+                // Deinterleave into per-channel accumulators.
+                for (i, &s) in data.iter().enumerate() {
+                    let ch = i % in_ch;
+                    accum[ch].push(s);
+                }
+                // Emit complete frames as they become available.
+                // All channels must have >= FRAME_SIZE samples before we emit.
+                while accum[0].len() >= FRAME_SIZE {
+                    // Pack: [ch: u32 LE][n: u32 LE][samples: f32[] LE] × in_ch
+                    let mut buf = Vec::with_capacity(in_ch * (8 + FRAME_SIZE * 4));
+                    for ch in 0..in_ch {
+                        buf.extend_from_slice(&(ch as u32).to_le_bytes());
+                        buf.extend_from_slice(&(FRAME_SIZE as u32).to_le_bytes());
+                        for &s in &accum[ch][..FRAME_SIZE] {
+                            buf.extend_from_slice(&s.to_le_bytes());
+                        }
+                        accum[ch].drain(..FRAME_SIZE);
+                    }
+                    // send() is non-async and non-blocking. Err means no receivers yet — fine.
+                    let _ = frame_tx_clone.send(buf);
                 }
             },
             |e| tracing::error!("input stream error: {e}"),
@@ -174,7 +182,7 @@ pub fn start(input_substr: &str, output_substr: &str, sample_rate: u32) -> Resul
             move |data: &mut [f32], _| {
                 let mut cons = pb_consumers_clone.lock().unwrap();
                 for (i, sample) in data.iter_mut().enumerate() {
-                    let ch = i % out_ch;  // interleave using actual device channel count
+                    let ch = i % out_ch;
                     *sample = cons[ch].pop().unwrap_or(0.0);
                 }
             },
@@ -187,22 +195,14 @@ pub fn start(input_substr: &str, output_substr: &str, sample_rate: u32) -> Resul
     output_stream.play().context("play output stream")?;
 
     Ok((
-        AudioChannels {
-            capture_consumers: cap_consumers,
-            playback_producers: pb_producers,
-        },
-        AudioStreams {
-            _input: input_stream,
-            _output: output_stream,
-        },
+        AudioChannels { frame_tx, playback_producers: pb_producers },
+        AudioStreams { _input: input_stream, _output: output_stream },
     ))
 }
 
 fn name_matches(cpal_name: &str, query: &str) -> bool {
     let a = cpal_name.to_lowercase();
     let b = query.to_lowercase();
-    // Web Audio API appends "(Virtual)", "(Built-in)" etc. that CPAL omits.
-    // Accept if either string is a substring of the other.
     a.contains(&b) || b.contains(&a)
 }
 
@@ -228,15 +228,8 @@ fn find_output_device(host: &cpal::Host, substr: &str) -> Result<Device> {
     if let Some(dev) = devs.into_iter().find(|d| d.name().map(|n| name_matches(&n, substr)).unwrap_or(false)) {
         return Ok(dev);
     }
-    // CoreAudio does not always enumerate the default output (e.g. built-in speakers).
-    // Check the default device by name first, then fall back to it unconditionally
-    // so the shim never crashes due to a stale device name in config.
     if let Some(def) = host.default_output_device() {
         let def_name = def.name().unwrap_or_default();
-        tracing::info!("default output device: {:?}", def_name);
-        if name_matches(&def_name, substr) {
-            return Ok(def);
-        }
         tracing::warn!("output '{substr}' not found — falling back to default '{def_name}'");
         return Ok(def);
     }
