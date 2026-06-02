@@ -70,7 +70,7 @@ The v0.1.0 DMG is published on the [GitHub Releases page](../../releases). For e
 
 If the previous DMG is still mounted, eject it first:
 ```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.0.1" -force
+hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
 ```
 
 ---
