@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-shim:
+    name: Build Rust shim (arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            shim/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('shim/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build shim
+        working-directory: shim
+        run: cargo build --release
+
+      - name: Upload shim binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: shim-binary
+          path: shim/target/release/shim
+          if-no-files-found: error
+
+  build-electron:
+    name: Build Electron app and publish release
+    runs-on: macos-latest
+    needs: build-shim
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history for release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download shim binary
+        uses: actions/download-artifact@v4
+        with:
+          name: shim-binary
+          path: shim/target/release
+
+      - name: Make shim executable
+        run: chmod +x shim/target/release/shim
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build DMG
+        working-directory: app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build
+
+      - name: Ad-hoc sign DMG
+        run: codesign --force --deep --sign - app/dist/*.dmg
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd app/dist
+          shasum -a 256 *.dmg > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Get previous tag; fall back to initial commit if this is the first tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          echo "Generating notes from ${PREV_TAG} to HEAD"
+          git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" > release-notes.md
+          echo "" >> release-notes.md
+          cat release-notes.md
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.VERSION }} — VDO.MultiCh.Comms"
+          body_path: release-notes.md
+          files: |
+            app/dist/*.dmg
+            app/dist/sha256sums.txt
+          fail_on_unmatched_files: true
