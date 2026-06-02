@@ -1,44 +1,49 @@
 # Known Issues & Status
 
-**Last updated:** 2026-06-02 — build 28
+**Last updated:** 2026-06-02 — v0.1.0 build 28
 
 ---
 
-## Resolved (build 28)
+## Install notes
+
+### App is ad-hoc signed, not notarized
+
+Right-click → Open is required on first launch on any Mac. Gatekeeper blocks a normal double-click until the user explicitly allows the app. This is expected for v0.1.0. Full Apple Developer ID notarization is planned post-alpha.
+
+---
+
+## Resolved
 
 ### Shim → VDO.ninja AudioWorklet bridge
-**Fixed.** The bridge is working and stable as of build 28.
+**Fixed (build 28).** The bridge is working and stable.
 
-Root causes found and fixed during debugging:
-- **Shared ring buffer contention** — the renderer's device-enumeration WebSocket connection and the per-line preload's audio WebSocket both connected to port 9696 and competed for the same `HeapConsumer`. The preload was starved of audio frames. Fix: renderer closes its WS immediately after receiving the device list (code 1000).
-- **Timer-driven dispatch jitter** — the tokio 10ms interval missed ticks under load, causing burst/drain cycles visible as 3s audio / 3s silence. Fix: replaced with CPAL-event-driven broadcast dispatch. The CPAL callback packs frames and broadcasts directly; no software timer.
-- **JS ring buffer too small** — 80ms ring was exhausted by tokio scheduler jitter. Increased to 2s (96000 samples) with 500ms startup hold.
-- **DevTools flood** — underrun counter was per-sample (375 messages/sec when empty). Fixed to per-`process()` call.
-- **`Fixed(480)` CPAL buffer size** — broke on MacBook Pro Microphone (CoreAudio doesn't honour arbitrary buffer sizes on all devices). Reverted to `Default`; the accumulator + broadcast design makes buffer size irrelevant.
+Root causes found and fixed:
+- **Shared ring buffer contention** — the renderer's device-enumeration WebSocket and the per-line preload's audio WebSocket both connected to port 9696 and competed for the same `HeapConsumer`. Fix: renderer closes its WS immediately (code 1000) after receiving the device list.
+- **Timer-driven dispatch jitter** — tokio 10ms interval missed ticks under load, causing burst/drain cycles. Fix: replaced with CPAL-event-driven broadcast dispatch.
+- **JS ring buffer too small** — 80ms ring exhausted by scheduler jitter. Increased to 2s (96000 samples) with 500ms startup hold.
+- **DevTools flood** — underrun counter fired per-sample. Fixed to per-`process()` call.
+- **`Fixed(480)` CPAL buffer size** — broke on MacBook Pro Microphone. Reverted to `Default`; the accumulator + broadcast design makes buffer size irrelevant.
 
 ### Network service crash loop
-**Fixed (build 22).** `lsof -ti tcp:9696` without `-s tcp:LISTEN` matched Chromium's outbound client connections to port 9696 along with the shim's listen socket, killing the network service. Fixed with `lsof -ti tcp:9696 -s tcp:LISTEN`.
+**Fixed (build 22).** `lsof -ti tcp:9696` without `-s tcp:LISTEN` matched Chromium's outbound connections to port 9696. Fixed with `lsof -ti tcp:9696 -s tcp:LISTEN`.
 
 ### Mic change not taking effect
-**Fixed (build 28).** When the shim restarts after a device change, active lines now automatically reconnect — getting a fresh WebSocket and preload to the new shim instance.
+**Fixed (build 28).** Active lines now automatically reconnect when the shim restarts after a device change.
 
 ---
 
 ## Open
 
+### Inbound audio not routed to hardware output channels
+The Rust shim has playback ring buffers (`playback_producers`) but they are not yet fed from VDO.ninja's WebRTC output. Remote audio plays through Electron's default audio output device rather than a specific hardware channel.
+
 ### STUN/TURN DNS failures in logs
 `errorcode: -105` from `services/network/p2p/socket_manager.cc` — cosmetic. WebRTC falls back to host ICE candidates (direct LAN IP). Works on LAN without TURN. Will not traverse NAT without a TURN server.
 
-**Workaround for cross-NAT use:** self-host Coturn and configure it in VDO.ninja. See [docs/self-hosting.md](self-hosting.md).
+**Workaround for cross-NAT use:** self-host Coturn. See [docs/self-hosting.md](self-hosting.md).
 
 ### `session.setPreloads` deprecation warning
-Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads` still works in current Electron version.
-
-### App is unsigned
-Right-click → Open required on first launch on any macOS machine that hasn't run it before. Gatekeeper will block a normal double-click until the user explicitly allows it.
-
-### Outbound audio path only (shim → VDO.ninja)
-The reverse path — inbound audio from remote participants into the shim's playback ring for hardware output — is implemented in the Rust side (`playback_producers`) but not yet wired from the VDO.ninja WebContentsView back to the shim. Remote audio currently plays through Electron's default audio output device.
+Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads` still works in the current Electron version.
 
 ---
 
@@ -48,11 +53,12 @@ The reverse path — inbound audio from remote participants into the shim's play
 - Session export / import (base64 code, Settings panel)
 - Per-line QR codes and join links (audio-only, `&webcam=1&vd=0&autostart=1`)
 - Director link per panel (`&director=ROOMKEY`, opens in system browser)
-- Device enumeration (CPAL channel count probe — handles BlackHole-style virtual devices)
-- Settings dropdowns populated from shim device list (accurate channel counts)
+- Device enumeration (CPAL channel count probe)
+- Settings dropdowns populated from shim device list
 - Shim auto-starts on app launch, restarts on device change
-- Active lines reconnect after shim restart (mic change takes effect without manual reconnect)
-- Port 9696 cleanup — only the shim's LISTEN socket is killed, not Chromium client connections
+- Active lines reconnect after shim restart
+- Port 9696 cleanup — only the shim's LISTEN socket is killed
 - AudioWorklet bridge: shim audio flows into VDO.ninja without hardware mic
 - 2s ring buffer + 500ms startup hold — stable under normal scheduler jitter
-- Build number in footer (v0.0.1 build N), auto-incremented on each DMG build
+- 2-machine party line validated (v0.1.0 PoC)
+- Build number in footer, auto-incremented on each DMG build

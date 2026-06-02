@@ -142,4 +142,4 @@ VDO.ninja uses a hosted WebSocket signaling server (`wss://ws.vdo.ninja`). For m
 - [ ] Set `vdo_base_url` in VDO.MultiCh.Comms settings to your domain
 - [ ] (Optional) Install Coturn, configure realm + credentials
 - [ ] (Optional) Edit VDO.ninja `config.js` to use your TURN server
-- [ ] Verify with the **Test connection** button in the app Settings panel
+- [ ] Verify by launching the app, joining a line from a remote device, and confirming audio flows

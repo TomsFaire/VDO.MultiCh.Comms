@@ -1,7 +1,7 @@
 # Agent Handoff — VDO.MultiCh.Comms
 
 **Date:** 2026-06-02
-**Current build:** 0.0.1 build 28
+**Current build:** 0.1.0 build 28
 **Branch:** `main`
 
 ---
@@ -37,7 +37,7 @@ app/              Electron app (Node.js main + HTML/JS renderer)
   scripts/
     bump-build.js Auto-increments build-meta.json before each dist build
     make-icns.sh  PNG → ICNS conversion
-  build-meta.json { "version": "0.0.1", "build": 28 }
+  build-meta.json { "version": "0.1.0", "build": 28 }
   package.json    electron-builder config, targets mac arm64 DMG
 
 shim/             Rust audio shim
@@ -55,11 +55,13 @@ cd shim && cargo build --release
 
 # Build DMG (auto-bumps build number)
 cd app && npm run build
-# Output: app/dist/VDO.MultiCh.Comms-0.0.1-arm64.dmg
+# Output: app/dist/VDO.MultiCh.Comms-0.1.0-arm64.dmg
 
 # Run dev (no DMG, shim must be pre-built)
 cd app && npx electron .
 ```
+
+The v0.1.0 DMG is published on the [GitHub Releases page](../../releases). For end-user install instructions see [docs/usage.md](usage.md); for full source build details see [docs/development.md](development.md).
 
 **Run from terminal to see logs:**
 ```bash
@@ -68,7 +70,7 @@ cd app && npx electron .
 
 If the previous DMG is still mounted, eject it first:
 ```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.0.1" -force
+hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
 ```
 
 ---

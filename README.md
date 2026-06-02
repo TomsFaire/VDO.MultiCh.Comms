@@ -1,10 +1,43 @@
 # VDO.MultiCh.Comms
 
-> **Alpha — v0.0.1 build 28.** Not production-ready. Expect rough edges.
+> **v0.1.0** — Alpha. Not production-ready. Expect rough edges.
 
-Multi-channel IP intercom built on [VDO.ninja](https://vdo.ninja) (WebRTC) and CPAL hardware audio I/O. Designed for live production environments where you need independent party lines routed to a multi-channel audio interface — without managing a custom UDP transport stack.
+A macOS desktop app that turns a multi-channel audio interface into a multi-party-line IP intercom — no SIP, no server, no install for remote participants.
 
-4 independent party lines. Remote participants join from any mobile browser via a QR code — no app install required.
+---
+
+## What it does
+
+- **4 independent party lines**, each a separate WebRTC room — crews on different lines don't hear each other
+- **Remote participants join from any phone or browser via QR code** — no app, no account required
+- **Hardware audio routed per channel** via a Rust/CPAL shim; works with BlackHole, Focusrite, and other multi-channel interfaces
+- **WebRTC transport via [VDO.ninja](https://vdo.ninja)** — handles NAT traversal, codec negotiation, and mixing
+
+---
+
+## Requirements
+
+- macOS Apple Silicon (arm64)
+- A multi-channel audio interface (e.g. BlackHole, Focusrite), or use the Mac's built-in mic
+- No Rust or Node.js required for end-users
+
+---
+
+## Install
+
+1. Download `VDO.MultiCh.Comms-0.1.0-arm64.dmg` from the [Releases page](../../releases)
+2. Mount the DMG and drag the app to Applications
+3. **Right-click → Open** on first launch — the app is ad-hoc signed but not notarized; Gatekeeper will block a normal double-click until you explicitly allow it
+
+---
+
+## Getting started
+
+On first launch a setup wizard prompts for an event name and up to 4 line names. Room keys are generated once from those names and are permanent.
+
+Each line panel shows a QR code. Remote participants scan it, allow microphone access, and are immediately connected.
+
+See [docs/usage.md](docs/usage.md) for a full walkthrough including audio device setup, session export/import, and the director view.
 
 ---
 
@@ -37,58 +70,18 @@ Remote participants scan a QR code and join from any device — no install requi
 | Director link per panel | ✅ Done |
 | VDO.ninja WebContentsView auto-join (silent, audio-only) | ✅ Done |
 | Rust shim — CPAL capture + playback | ✅ Done |
-| Shim → VDO.ninja AudioWorklet bridge | ✅ Working (build 28) |
-| Hardware-clocked broadcast dispatch (no timer drift) | ✅ Done (build 28) |
-| Mic change reconnects active lines automatically | ✅ Done (build 28) |
-| Port 9696 crash-loop fix (`lsof -s tcp:LISTEN`) | ✅ Fixed (build 22) |
+| Shim → VDO.ninja AudioWorklet bridge | ✅ Stable |
+| Hardware-clocked broadcast dispatch (no timer drift) | ✅ Done |
+| Mic change reconnects active lines automatically | ✅ Done |
+| 2-machine party line (PoC validated) | ✅ Done |
 | Device enumeration from shim (CPAL channel counts) | ✅ Done |
 | Build number auto-bump + DMG packaging | ✅ Done |
 | macOS TCC microphone permission | ✅ Done |
 | Inbound audio (remote → local speakers) | ✅ Done |
-| Outbound audio via shim bridge | ✅ Stable (build 28) |
+| Outbound audio via shim bridge | ✅ Stable |
+| Inbound audio → hardware output channels | ⏳ Not yet wired |
 | STUN/TURN (cross-NAT) | ⏳ LAN only for now |
-| Code signing | ⏳ Post-alpha |
-| `session.setPreloads` → `registerPreloadScript` | ⏳ Low priority |
-
----
-
-## Prerequisites
-
-- macOS (Apple Silicon — arm64 DMG)
-- [Rust](https://rustup.rs) (stable) — to build the shim from source
-- Node.js 18+ — to build the Electron app
-- A multi-channel audio interface (e.g. BlackHole, Focusrite), or use the Mac's built-in mic
-
----
-
-## Getting started
-
-### 1. Build the Rust audio shim
-
-```bash
-cd shim
-cargo build --release
-```
-
-### 2. Install and launch the Electron app (dev)
-
-```bash
-cd app
-npm install
-npm start
-```
-
-The app spawns the shim automatically on startup. Config lives at `~/.vdo-multichan/config.json` and is created on first run.
-
-### 3. Build a distributable DMG
-
-```bash
-cd shim && cargo build --release
-cd ../app && npm run build
-# Output: app/dist/VDO.MultiCh.Comms-0.0.1-arm64.dmg
-```
-
-The app is unsigned — right-click → Open on first launch on any machine.
+| Code signing / notarization | ⏳ Post-alpha |
 
 ---
 
@@ -114,37 +107,15 @@ Room keys are permanent — derived from line names at first-run setup. Renaming
 
 ---
 
-## Joining a party line
-
-Each line panel shows a QR code and a copy-link button. Remote participants:
-
-1. Scan the QR code or open the link on any device
-2. Allow microphone access when prompted
-3. They're in — no install, no account
-
----
-
-## Architecture notes
-
-### Shim broadcast dispatch
-
-The CPAL input callback accumulates interleaved samples into pre-allocated per-channel buffers. When a full `FRAME_SIZE` (480 samples = 10ms @ 48kHz) is ready, it packs a multi-channel binary packet and sends via `tokio::sync::broadcast`. Each WebSocket client has its own independent receiver — no shared consumer contention.
-
-Packet format: `[ch: u32 LE][n_samples: u32 LE][samples: f32[] LE]` × N channels.
-
-### AudioWorklet bridge
-
-Each VDO.ninja `WebContentsView` gets a per-line preload script loaded via `session.setPreloads`. The preload overrides `navigator.mediaDevices.getUserMedia` synchronously before any VDO.ninja JS runs. On async init it opens `ws://127.0.0.1:9696`, feeds matching-channel frames into an `AudioWorkletNode` ring buffer (2s capacity, 500ms startup hold), and resolves `getUserMedia` with the `MediaStreamDestinationNode` stream. Falls back to native mic if the shim is unavailable within 10s.
-
-### Mic change reconnect
-
-When the user saves a new input device, the shim restarts. The app tracks `lineConfigs` (url + channelId per active line) and reconnects all open lines 1s after the new shim starts, giving each preload a fresh WebSocket to the new shim instance.
-
----
-
 ## Self-hosting
 
 See [docs/self-hosting.md](docs/self-hosting.md) for running your own VDO.ninja instance and TURN server.
+
+---
+
+## Development
+
+See [docs/development.md](docs/development.md) for source build instructions, repo layout, and architecture notes.
 
 ---
 
