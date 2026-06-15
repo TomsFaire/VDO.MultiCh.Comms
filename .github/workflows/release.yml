@@ -6,39 +6,9 @@ on:
       - 'v*.*.*'
 
 jobs:
-  build-shim:
-    name: Build Rust shim (arm64)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            shim/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('shim/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build shim
-        working-directory: shim
-        run: cargo build --release
-
-      - name: Upload shim binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: shim-binary
-          path: shim/target/release/shim
-          if-no-files-found: error
-
   build-electron:
     name: Build Electron app and publish release
     runs-on: macos-latest
-    needs: build-shim
     permissions:
       contents: write
     steps:
@@ -46,15 +16,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Download shim binary
-        uses: actions/download-artifact@v4
-        with:
-          name: shim-binary
-          path: shim/target/release
-
-      - name: Make shim executable
-        run: chmod +x shim/target/release/shim
 
       - name: Set up Node 20
         uses: actions/setup-node@v4
@@ -66,6 +27,12 @@ jobs:
       - name: Install Node dependencies
         working-directory: app
         run: npm ci
+
+      - name: Build CoreAudio native addon
+        working-directory: app/native
+        run: |
+          npm install
+          npm run build
 
       - name: Build DMG
         working-directory: app

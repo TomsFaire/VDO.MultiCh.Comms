@@ -1,6 +1,6 @@
 {
   "name": "vdo-multichan-comms",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-channel IP intercom via VDO.ninja + CPAL audio shim",
   "main": "main.js",
   "scripts": {
@@ -13,7 +13,6 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
-    "ws": "^8.16.0",
     "qrcode": "^1.5.4"
   },
   "build": {
@@ -28,8 +27,8 @@
     ],
     "extraResources": [
       {
-        "from": "../shim/target/release/shim",
-        "to": "shim"
+        "from": "native/build/Release/coreaudio.node",
+        "to": "coreaudio.node"
       }
     ],
     "mac": {

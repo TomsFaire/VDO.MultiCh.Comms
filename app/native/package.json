@@ -1,0 +1,16 @@
+{
+  "name": "coreaudio-devices",
+  "version": "1.0.0",
+  "description": "CoreAudio device enumeration and capture for Electron",
+  "main": "build/Release/coreaudio.node",
+  "scripts": {
+    "build": "npx node-gyp rebuild",
+    "install": "npx node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^12.3.0"
+  }
+}

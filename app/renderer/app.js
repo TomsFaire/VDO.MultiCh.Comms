@@ -11,101 +11,65 @@ async function renderQr(id, url) {
     img.alt = 'QR unavailable';
   }
 }
-let shimDevices = []; // device names received from shim on connect
+let shimDevices = { inputs: [], outputs: [] };
 const lineStates = {}; // { [id]: { connected: boolean } }
 
-// ── Shim WebSocket ─────────────────────────────────────────────────────────
-
-let shimWs = null;
-
-function connectShim() {
-  const ws = new WebSocket('ws://127.0.0.1:9696');
-  // Close immediately after receiving the device list — this connection is
-  // only for the JSON device enumeration. Staying open drains the audio ring
-  // buffer that the shim bridge preload needs for audio frames.
-  ws.addEventListener('message', (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.msg_type === 'devices') {
-        ws.close();
-        if (!config) return;
-        const merge = (shimEntries, existing) => shimEntries.map(e => ({
-          name: e.name,
-          channels: e.channels,
-          deviceId: existing.find(d => {
-            const a = d.name.toLowerCase(), b = e.name.toLowerCase();
-            return a.includes(b) || b.includes(a);
-          })?.deviceId || '',
-        }));
-        shimDevices = {
-          inputs: merge(msg.input_devices || [], shimDevices.inputs || []),
-          outputs: merge(msg.output_devices || [], shimDevices.outputs || []),
-        };
-        populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
-        populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
-        const c = queryChannelCounts(config.input_device, config.output_device);
-        inputChannelCount = c.inCount;
-        outputChannelCount = c.outCount;
-        updateChannelDropdowns();
-      }
-    } catch (_) { /* binary audio frame — not for this connection */ }
-  });
-  ws.addEventListener('close', (e) => {
-    // Only retry if this was an unexpected close (not our own ws.close())
-    if (e.code !== 1000) setTimeout(connectShim, 2000);
-  });
-  ws.addEventListener('error', () => setTimeout(connectShim, 2000));
+async function connectShim() {
+  const devices = await window.api.listAudioDevices();
+  shimDevices = {
+    inputs:  devices.filter(d => d.inChannels  > 0).map(d => ({
+      name: d.name, uid: d.uid, channels: d.inChannels,
+    })),
+    outputs: devices.filter(d => d.outChannels > 0).map(d => ({
+      name: d.name, uid: d.uid, channels: d.outChannels,
+    })),
+  };
 }
 
-// devices is [{name, deviceId}] or [string] — normalises both
-function populateDeviceDropdown(select, devices, configKey) {
+// devices is [{name, uid, channels}] — dropdown values are UIDs
+function populateDeviceDropdown(select, devices, uidKey, nameKey) {
   if (!select) return;
   select.innerHTML = '<option value="">Default</option>';
   devices.forEach((d) => {
-    const name = typeof d === 'string' ? d : d.name;
     const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
-    if (name === config?.[configKey]) opt.selected = true;
+    opt.value = d.uid;
+    const chLabel = d.channels != null ? ` (${d.channels} ch)` : '';
+    opt.textContent = `${d.name}${chLabel}`;
+    if (d.uid === config?.[uidKey] || (!config?.[uidKey] && d.name === config?.[nameKey])) {
+      opt.selected = true;
+    }
     select.appendChild(opt);
   });
 }
 
-// Enumerate audio devices — returns {name, deviceId} objects so channel counts can be queried
-async function enumerateAudioDevices() {
-  try {
-    await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop()));
-    const all = await navigator.mediaDevices.enumerateDevices();
-    const seen = (kind) => {
-      const names = new Set();
-      return all
-        .filter(d => d.kind === kind && d.label)
-        .filter(d => names.has(d.label) ? false : names.add(d.label))
-        .map(d => ({ name: d.label, deviceId: d.deviceId }));
-    };
-    return { inputs: seen('audioinput'), outputs: seen('audiooutput') };
-  } catch (_) {
-    return { inputs: [], outputs: [] };
+function findInputDevice() {
+  if (config.input_device_uid) {
+    return shimDevices.inputs.find(d => d.uid === config.input_device_uid);
   }
+  if (config.input_device) {
+    return shimDevices.inputs.find(d => d.name === config.input_device) ||
+      shimDevices.inputs.find(d => d.name.toLowerCase().includes(config.input_device.toLowerCase()));
+  }
+  return null;
 }
 
-// Look up channel counts from shim device info (CPAL — accurate for multi-channel interfaces).
-// Uses substring matching because CPAL and Web Audio API report different names for the same
-// device on macOS (e.g. "BlackHole 16ch" vs "BlackHole 16ch (Virtual)").
-function queryChannelCounts(inputName, outputName) {
-  const fuzzy = (devices, name) => {
-    if (!name || !devices) return null;
-    const a = name.toLowerCase();
-    return devices.find(d => {
-      const b = d.name.toLowerCase();
-      return a.includes(b) || b.includes(a);
-    });
-  };
-  const inDev = fuzzy(shimDevices.inputs, inputName);
-  const outDev = fuzzy(shimDevices.outputs, outputName);
+function findOutputDevice() {
+  if (config.output_device_uid) {
+    return shimDevices.outputs.find(d => d.uid === config.output_device_uid);
+  }
+  if (config.output_device) {
+    return shimDevices.outputs.find(d => d.name === config.output_device) ||
+      shimDevices.outputs.find(d => d.name.toLowerCase().includes(config.output_device.toLowerCase()));
+  }
+  return null;
+}
+
+function queryChannelCounts() {
+  const inDev  = findInputDevice();
+  const outDev = findOutputDevice();
   return {
-    inCount: inDev?.channels || 2,
-    outCount: outDev?.channels || 2,
+    inCount:  inDev  ? inDev.channels  : 2,
+    outCount: outDev ? outDev.channels : 2,
   };
 }
 
@@ -132,44 +96,134 @@ function updateChannelDropdowns() {
 function updateDeviceLabel() {
   const label = document.getElementById('device-label');
   if (!label) return;
-  const i = config.input_device || 'Default';
-  const o = config.output_device || 'Default';
+  const inDev = findInputDevice();
+  const outDev = findOutputDevice();
+  const i = inDev ? `${inDev.name} (${inDev.channels}ch)` : 'Default';
+  const o = outDev ? `${outDev.name} (${outDev.channels}ch)` : 'Default';
   label.textContent = `In: ${i} / Out: ${o}`;
+}
+
+async function startCaptureForConfig() {
+  const inDev = findInputDevice();
+  if (!inDev) return;
+  const counts = queryChannelCounts();
+  const nCh = config.input_channels_override || counts.inCount;
+  const result = await window.api.startAudioCapture(inDev.uid, nCh);
+  if (result && !result.ok) {
+    console.error('Audio capture failed:', result.error);
+    alert(`Audio capture failed: ${result.error}`);
+  }
 }
 
 async function init() {
   const firstRun = await window.api.isFirstRun();
   config = await window.api.getConfig();
   const meta = await window.api.getBuildMeta();
-  document.getElementById('build-label').textContent = `v${meta.version} build ${meta.build}`;
-  connectShim();
+  const versionLabel = `v${meta.version} build ${meta.build}`;
+  document.getElementById('build-label').textContent = versionLabel;
+  const headerVer = document.getElementById('header-version');
+  if (headerVer) headerVer.textContent = versionLabel;
+  document.title = `VDO.MultiCh.Comms ${versionLabel}`;
+  await connectShim();
   updateDeviceLabel();
   setupSettings();
   if (firstRun) {
     await showSetupWizard();
   }
+  renderCommsBar();
   renderLines();
-  // Populate device lists immediately from Web Audio API — shim may not be running yet
-  shimDevices = await enumerateAudioDevices();
-  populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
-  populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
-  // Set channel dropdowns — honour saved overrides, fall back to detected
-  const counts = queryChannelCounts(config.input_device, config.output_device);
+  populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device_uid', 'input_device');
+  populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device_uid', 'output_device');
+  const counts = queryChannelCounts();
   inputChannelCount = config.input_channels_override || counts.inCount;
   outputChannelCount = config.output_channels_override || counts.outCount;
   updateChannelDropdowns();
+  if (config.input_device_uid || config.input_device) {
+    await startCaptureForConfig();
+  }
 }
 
 function channelOptions(selected, count = 16) {
   return Array.from({ length: count }, (_, i) =>
-    `<option value="${i}" ${i === selected ? 'selected' : ''}>Ch ${i}</option>`
+    `<option value="${i}" ${i === selected ? 'selected' : ''}>${i + 1}</option>`
   ).join('');
 }
 
-function directorUrl(baseUrl, roomKey) {
-  // VDO.ninja: &director=ROOMNAME (room name is the param value, not a separate &room)
-  const params = new URLSearchParams({
-    director: roomKey,
+function sanitiseKey(str) {
+  return String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function groupFromName(name, fallbackId) {
+  const g = sanitiseKey(name);
+  return g || `pl${fallbackId + 1}`;
+}
+
+function vdoBaseUrl() {
+  return (config.vdo_base_url || 'https://vdo.ninja').replace(/\/$/, '');
+}
+
+function getCommsRoom() {
+  return config.comms_room || sanitiseKey(config.instance_name) || 'default';
+}
+
+function getLineGroup(line) {
+  return line.group || groupFromName(line.name, line.id);
+}
+
+function allGroups() {
+  return config.lines.map(getLineGroup).join(',');
+}
+
+function withPassword(params) {
+  if (config.comms_password) params.set('password', config.comms_password);
+  return params;
+}
+
+function applyWebRtcParams(params) {
+  if (config.webrtc_turn_off !== false) params.set('turn', 'off');
+  if (config.webrtc_stun_only || config.webrtc_lan_mode !== false) params.set('stunonly', '');
+  return params;
+}
+
+function commsJoinUrl() {
+  const params = applyWebRtcParams(withPassword(new URLSearchParams({
+    room: getCommsRoom(),
+    groups: allGroups(),
+    groupmode: '1',
+    sampleRate: '48000',
+  })));
+  return `${vdoBaseUrl()}/comms?${params}`;
+}
+
+function lineUrl(line) {
+  const group = getLineGroup(line);
+  const params = applyWebRtcParams(withPassword(new URLSearchParams({
+    room: getCommsRoom(),
+    push: `${getCommsRoom()}_${group}`,
+    group,
+    groupmode: '1',
+    webcam: '1',
+    vd: '0',
+    videodevice: '0',
+    autostart: '1',
+    label: line.location || line.name,
+    labelsuggestion: '1',
+    monomic: '1',
+    proaudio: '1',
+    sampleRate: '48000',
+    noisetgate: '0',
+    compressor: '0',
+    autoGain: '0',
+    cleanoutput: '1',
+  })));
+  return `${vdoBaseUrl()}/?${params}`;
+}
+
+function directorUrl() {
+  const params = applyWebRtcParams(withPassword(new URLSearchParams({
+    director: getCommsRoom(),
+    groups: allGroups(),
+    groupmode: '1',
     vd: '0',
     ad: '0',
     channelCount: '1',
@@ -180,26 +234,28 @@ function directorUrl(baseUrl, roomKey) {
     label: config.instance_name || 'Director',
     notify: '1',
     showconnections: '1',
-  });
-  return `${baseUrl}/?${params}`;
+  })));
+  return `${vdoBaseUrl()}/?${params}`;
 }
 
-function joinUrl(line) {
-  const params = new URLSearchParams({
-    room: line.room_key,
-    webcam: '1',          // join as mic/webcam participant (required for autostart to work)
-    vd: '0',              // no video device
-    videodevice: '0',     // no camera
-    autostart: '1',       // auto-join without clicking Start (essential for hidden view)
-    label: line.location || line.name,
-    labelsuggestion: '1',
-    monomic: '1',
-    proaudio: '1',
-    noisetgate: '0',
-    compressor: '0',
-    autoGain: '0',
-  });
-  return `${config.vdo_base_url}/?${params}`;
+function renderCommsBar() {
+  const joinUrl = commsJoinUrl();
+  const dirUrl = directorUrl();
+  const roomEl = document.getElementById('comms-room-label');
+  const joinInput = document.getElementById('comms-join-url');
+  const dirLink = document.getElementById('comms-director-link');
+  const buildHint = document.getElementById('comms-build-hint');
+  if (roomEl) roomEl.textContent = getCommsRoom();
+  if (joinInput) joinInput.value = joinUrl;
+  if (dirLink) dirLink.href = dirUrl;
+  if (buildHint && !joinUrl.includes('/comms?')) {
+    buildHint.textContent = 'Warning: join URL is not a Comms link — reinstall the latest build.';
+    buildHint.className = 'comms-warn';
+  } else if (buildHint) {
+    buildHint.textContent = 'Mobile: tap a party-line button before talking (ungrouped audio goes to all lines).';
+    buildHint.className = 'comms-hint';
+  }
+  renderQr('comms', joinUrl);
 }
 
 function renderLines() {
@@ -214,19 +270,21 @@ function renderLines() {
 
     panel.innerHTML = `
       <h2><span class="editable-name" data-line="${line.id}" contenteditable="true" spellcheck="false">${line.name}</span></h2>
+      <div class="group-badge">Group: <span class="group-name" id="group-${line.id}">${getLineGroup(line)}</span></div>
       <div class="location-row"><span class="editable-location" data-line="${line.id}" contenteditable="true" spellcheck="false" data-placeholder="Location…">${line.location || ''}</span></div>
       <div class="meter"><div class="meter-bar" id="meter-${line.id}"></div></div>
       <div class="channel-row">
         <label>In</label>
-        <select id="ch-in-${line.id}" data-line="${line.id}" data-dir="in">
-          ${channelOptions(line.input_channel)}
+        <select id="ch-in-${line.id}" data-line="${line.id}" data-dir="in" title="Hardware input 1–${outputChannelCount}">
+          ${channelOptions(line.input_channel, inputChannelCount)}
         </select>
       </div>
       <div class="channel-row">
         <label>Out</label>
-        <select id="ch-out-${line.id}" data-line="${line.id}" data-dir="out">
-          ${channelOptions(line.output_channel)}
+        <select id="ch-out-${line.id}" data-line="${line.id}" data-dir="out" title="Hardware output 1–${outputChannelCount}">
+          ${channelOptions(line.output_channel, outputChannelCount)}
         </select>
+        <button type="button" class="test-btn" onclick="testOutChannel(${line.id})" title="440 Hz test tone on this output">Test</button>
       </div>
       <div class="gain-row">
         <span>Gain in</span>
@@ -238,26 +296,11 @@ function renderLines() {
         <input type="range" min="0" max="3" step="0.05" value="${line.gain_out}" data-line="${line.id}" data-dir="out" />
         <span id="gain-out-val-${line.id}">${line.gain_out.toFixed(2)}</span>
       </div>
-      <div class="join-section">
-        <img class="qr" id="qr-${line.id}" alt="QR code" />
-        <div class="copy-row">
-          <input type="text" readonly value="${joinUrl(line)}" id="join-${line.id}" />
-          <button onclick="copyJoinLink(${line.id})">Copy</button>
-        </div>
-      </div>
       <button class="connect-btn" id="connect-${line.id}" onclick="toggleConnect(${line.id})">Connect</button>
-      <div class="director-row">
-        <span class="director-label">Director</span>
-        <a class="director-link" id="director-${line.id}" href="${directorUrl(config.vdo_base_url, line.room_key)}" target="_blank">Open ↗</a>
-        <button onclick="copyDirectorLink(${line.id})">Copy link</button>
-      </div>
     `;
 
     container.appendChild(panel);
   });
-
-  // QR codes — generated in main process via IPC (qrcode is Node-only, no browser bundle)
-  config.lines.forEach((line) => renderQr(line.id, joinUrl(line)));
 
   // Channel select listeners
   document.querySelectorAll('select[data-line]').forEach((el) => {
@@ -301,7 +344,10 @@ function renderLines() {
       const line = config.lines.find((l) => l.id === id);
       if (line) {
         line.name = val;
-        // Room key is permanent — renaming does not change which room this line uses
+        line.group = groupFromName(val, id);
+        const groupEl = document.getElementById(`group-${id}`);
+        if (groupEl) groupEl.textContent = line.group;
+        renderCommsBar();
         window.api.saveConfig(config);
       }
     });
@@ -320,6 +366,14 @@ function renderLines() {
   });
 }
 
+async function testOutChannel(id) {
+  const line = config.lines.find((l) => l.id === id);
+  if (!line) return;
+  await window.api.restartPlayback();
+  const res = await window.api.playTestTone(line.output_channel, 800);
+  if (!res.ok) alert('Test tone failed: ' + (res.error || 'unknown'));
+}
+
 async function toggleConnect(id) {
   const state = lineStates[id];
   state.connected = !state.connected;
@@ -331,38 +385,48 @@ async function toggleConnect(id) {
   if (!line) return;
 
   if (state.connected) {
-    // Use a WebContentsView in the main process — proper Chromium instance with
-    // real mic access, not a suppressed hidden iframe
-    await window.api.connectLine(id, joinUrl(line), line.input_channel);
+    const otherConnected = config.lines.filter(
+      (l) => l.id !== id && lineStates[l.id]?.connected
+    ).length;
+    if (otherConnected > 0) {
+      await new Promise((r) => setTimeout(r, otherConnected * 1500));
+    }
+    await window.api.connectLine(
+      id,
+      lineUrl(line),
+      line.input_channel,
+      line.output_channel,
+      line.gain_out,
+      getLineGroup(line)
+    );
   } else {
     await window.api.disconnectLine(id);
   }
 }
 
-function copyJoinLink(id) {
-  const el = document.getElementById(`join-${id}`);
+function copyCommsLink() {
+  const el = document.getElementById('comms-join-url');
   navigator.clipboard.writeText(el.value);
-  const btn = el.nextElementSibling;
+  const btn = document.getElementById('comms-copy-btn');
   btn.textContent = 'Copied!';
-  setTimeout(() => (btn.textContent = 'Copy'), 1500);
+  setTimeout(() => (btn.textContent = 'Copy link'), 1500);
 }
 
-function copyDirectorLink(id) {
-  const line = config.lines.find(l => l.id === id);
-  if (!line) return;
-  const url = directorUrl(config.vdo_base_url, line.room_key);
-  navigator.clipboard.writeText(url);
-  const btn = document.querySelector(`#director-${id} + button`) ||
-    document.querySelector(`.director-row button[onclick="copyDirectorLink(${id})"]`);
-  if (btn) { btn.textContent = 'Copied!'; setTimeout(() => (btn.textContent = 'Copy'), 1500); }
+function copyDirectorLink() {
+  navigator.clipboard.writeText(directorUrl());
+  const btn = document.getElementById('comms-director-copy');
+  btn.textContent = 'Copied!';
+  setTimeout(() => (btn.textContent = 'Copy'), 1500);
 }
 
 // ── Session export / import ───────────────────────────────────────────────────
 
 function exportSession() {
   const session = {
-    v: 1,
-    lines: config.lines.map(l => ({ id: l.id, name: l.name, room_key: l.room_key })),
+    v: 2,
+    comms_room: getCommsRoom(),
+    comms_password: config.comms_password || '',
+    lines: config.lines.map(l => ({ id: l.id, name: l.name, group: getLineGroup(l) })),
   };
   return btoa(JSON.stringify(session));
 }
@@ -374,22 +438,47 @@ function applySession(code) {
   } catch (_) {
     throw new Error('Invalid session code — could not decode.');
   }
-  if (parsed.v !== 1 || !Array.isArray(parsed.lines)) {
-    throw new Error('Invalid session code — unexpected format.');
+  if (parsed.v === 2) {
+    if (!parsed.comms_room || !Array.isArray(parsed.lines)) {
+      throw new Error('Invalid session code — unexpected format.');
+    }
+    config.comms_room = sanitiseKey(parsed.comms_room);
+    config.instance_name = config.comms_room;
+    config.comms_password = parsed.comms_password || '';
+    parsed.lines.forEach((sl, i) => {
+      const line = config.lines[i];
+      if (!line) return;
+      line.name = sl.name;
+      line.group = sanitiseKey(sl.group) || groupFromName(sl.name, line.id);
+    });
+    return;
   }
-  parsed.lines.forEach((sl, i) => {
-    const line = config.lines[i];
-    if (!line) return;
-    line.name = sl.name;
-    line.room_key = sl.room_key;
-  });
+  if (parsed.v === 1 && Array.isArray(parsed.lines)) {
+    const keys = parsed.lines.map(l => l.room_key).filter(Boolean);
+    let prefix = keys[0] || 'default';
+    for (const key of keys) {
+      let i = 0;
+      while (i < prefix.length && i < key.length && prefix[i] === key[i]) i++;
+      prefix = prefix.slice(0, i);
+    }
+    config.comms_room = prefix || keys[0] || 'default';
+    config.instance_name = config.comms_room;
+    parsed.lines.forEach((sl, i) => {
+      const line = config.lines[i];
+      if (!line) return;
+      line.name = sl.name;
+      if (config.comms_room && sl.room_key?.startsWith(config.comms_room)) {
+        line.group = sl.room_key.slice(config.comms_room.length) || groupFromName(sl.name, line.id);
+      } else {
+        line.group = sanitiseKey(sl.room_key) || groupFromName(sl.name, line.id);
+      }
+    });
+    return;
+  }
+  throw new Error('Invalid session code — unexpected format.');
 }
 
 // ── First-run setup wizard ────────────────────────────────────────────────────
-
-function sanitiseKey(str) {
-  return str.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
 
 function showSetupWizard() {
   return new Promise((resolve) => {
@@ -436,7 +525,7 @@ function showSetupWizard() {
         grid.appendChild(div);
       });
 
-      // Live preview of room keys
+      // Live preview of comms room + groups
       const eventInput = document.getElementById('setup-event-name');
       const confirmBtn = document.getElementById('setup-confirm');
       const preview = document.getElementById('setup-key-preview');
@@ -449,8 +538,8 @@ function showSetupWizard() {
         config.lines.forEach((line) => {
           const nameInput = document.getElementById(`setup-line-${line.id}`);
           const keyEl = document.getElementById(`setup-line-key-${line.id}`);
-          const linePart = sanitiseKey(nameInput?.value || line.name);
-          keyEl.textContent = valid ? `room: ${event}${linePart || `pl${line.id + 1}`}` : '';
+          const group = groupFromName(nameInput?.value || line.name, line.id);
+          keyEl.textContent = valid ? `group: ${group}` : '';
         });
       }
 
@@ -470,11 +559,13 @@ function showSetupWizard() {
         msg.className = 'setup-msg fail';
         return;
       }
+      config.comms_room = event;
+      config.instance_name = event;
       config.lines.forEach((line) => {
         const nameInput = document.getElementById(`setup-line-${line.id}`);
         const name = nameInput?.value.trim() || line.name;
         line.name = name;
-        line.room_key = event + sanitiseKey(name || `pl${line.id + 1}`);
+        line.group = groupFromName(name || `pl${line.id + 1}`, line.id);
       });
       await window.api.saveConfig(config);
       overlay.classList.remove('open');
@@ -500,15 +591,16 @@ function setupSettings() {
     customRow.style.display = isCustom ? 'flex' : 'none';
     testStatus.textContent = '';
     // Re-enumerate on open so newly connected devices appear
-    shimDevices = await enumerateAudioDevices();
-    populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device');
-    populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device');
+    await connectShim();
+    populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device_uid', 'input_device');
+    populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device_uid', 'output_device');
     // Show detected channel counts as hints; pre-fill overrides from config
-    const detected = queryChannelCounts(config.input_device, config.output_device);
+    const detected = queryChannelCounts();
     document.getElementById('input-ch-detected').textContent = `(detected: ${detected.inCount})`;
     document.getElementById('output-ch-detected').textContent = `(detected: ${detected.outCount})`;
     document.getElementById('input-ch-override').value = config.input_channels_override || '';
     document.getElementById('output-ch-override').value = config.output_channels_override || '';
+    document.getElementById('comms-password').value = config.comms_password || '';
     // Pre-populate export code
     document.getElementById('session-export-code').value = exportSession();
     document.getElementById('session-export-msg').textContent = '';
@@ -535,6 +627,7 @@ function setupSettings() {
     try {
       applySession(code);
       await window.api.saveConfig(config);
+      renderCommsBar();
       renderLines();
       msg.textContent = 'Session imported successfully.';
       msg.className = 'session-import-msg ok';
@@ -569,31 +662,36 @@ function setupSettings() {
   });
 
   document.getElementById('save-settings').addEventListener('click', async () => {
-    config.input_device = document.getElementById('input-device-select').value;
-    config.output_device = document.getElementById('output-device-select').value;
+    const inUid = document.getElementById('input-device-select').value;
+    const outUid = document.getElementById('output-device-select').value;
+    const inDev = shimDevices.inputs.find(d => d.uid === inUid);
+    const outDev = shimDevices.outputs.find(d => d.uid === outUid);
+    config.input_device_uid = inUid || '';
+    config.output_device_uid = outUid || '';
+    config.input_device = inDev?.name || '';
+    config.output_device = outDev?.name || '';
     const isCustom = preset.value === 'custom';
     config.vdo_base_url = isCustom ? customUrl.value.trim() : 'https://vdo.ninja';
+    config.comms_password = document.getElementById('comms-password').value.trim();
     // Apply channel count overrides (or detected values from shim)
     const inOverride = parseInt(document.getElementById('input-ch-override').value) || 0;
     const outOverride = parseInt(document.getElementById('output-ch-override').value) || 0;
     config.input_channels_override = inOverride || null;
     config.output_channels_override = outOverride || null;
-    const detected = queryChannelCounts(config.input_device, config.output_device);
+    const detected = queryChannelCounts();
     inputChannelCount = inOverride || detected.inCount;
     outputChannelCount = outOverride || detected.outCount;
     updateChannelDropdowns();
     await window.api.saveConfig(config);
-    await window.api.restartShim();
+    if (config.input_device_uid) {
+      await startCaptureForConfig();
+    } else {
+      await window.api.stopAudioCapture();
+    }
+    await window.api.restartPlayback();
     updateDeviceLabel();
     overlay.classList.remove('open');
-    // Refresh join links and QR codes
-    config.lines.forEach((line) => {
-      const url = joinUrl(line);
-      const input = document.getElementById(`join-${line.id}`);
-      if (input) input.value = url;
-      const canvas = document.getElementById(`qr-${line.id}`);
-      renderQr(line.id, url);
-    });
+    renderCommsBar();
   });
 }
 
