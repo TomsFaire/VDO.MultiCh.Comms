@@ -10,6 +10,7 @@
 
     header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: #111; border-bottom: 1px solid #333; }
     header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+    .header-version { font-size: 12px; font-weight: 500; color: #7ec87e; letter-spacing: 0; }
     header button { background: #333; border: none; color: #ccc; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
     header button:hover { background: #444; }
 
@@ -35,12 +36,25 @@
     .gain-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #aaa; }
     .gain-row input[type=range] { flex: 1; accent-color: #4caf50; }
 
-    .join-section { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-    .join-section img.qr { width: 120px; height: 120px; border-radius: 4px; background: #fff; padding: 4px; }
-    .join-section .copy-row { display: flex; gap: 6px; width: 100%; }
-    .join-section .copy-row input { flex: 1; font-size: 11px; background: #1a1a1a; border: 1px solid #333; color: #aaa; padding: 4px 8px; border-radius: 4px; font-family: monospace; min-width: 0; }
-    .join-section .copy-row button { font-size: 11px; background: #333; border: none; color: #ccc; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
-    .join-section .copy-row button:hover { background: #444; }
+    .group-badge { font-size: 11px; color: #888; font-family: monospace; }
+    .group-badge .group-name { color: #7ec87e; }
+
+    /* Shared comms join bar */
+    #comms-bar { display: flex; align-items: center; gap: 16px; padding: 12px 20px; background: #1e1e1e; border-bottom: 1px solid #333; flex-wrap: wrap; }
+    #comms-bar .comms-info { flex: 1; min-width: 200px; }
+    #comms-bar .comms-info h2 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+    #comms-bar .comms-info p { font-size: 11px; color: #888; }
+    #comms-bar .comms-room { font-family: monospace; color: #7ec87e; }
+    #comms-bar img.qr { width: 100px; height: 100px; border-radius: 4px; background: #fff; padding: 4px; flex-shrink: 0; }
+    #comms-bar .comms-links { display: flex; flex-direction: column; gap: 6px; flex: 2; min-width: 280px; }
+    #comms-bar .comms-link-row { display: flex; gap: 6px; align-items: center; }
+    #comms-bar .comms-link-row label { font-size: 11px; color: #666; width: 52px; flex-shrink: 0; }
+    #comms-bar .comms-link-row input { flex: 1; font-size: 11px; background: #1a1a1a; border: 1px solid #333; color: #aaa; padding: 4px 8px; border-radius: 4px; font-family: monospace; min-width: 0; }
+    #comms-bar .comms-link-row button, #comms-bar .comms-link-row a { font-size: 11px; background: #333; border: none; color: #ccc; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; text-decoration: none; }
+    #comms-bar .comms-link-row a:hover { background: #444; color: #7ec87e; }
+    #comms-bar .comms-link-row button:hover { background: #444; }
+    .comms-hint { font-size: 10px; color: #555; }
+    .comms-warn { font-size: 10px; color: #f44336; }
 
     .channel-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; }
     .channel-row label { width: 24px; }
@@ -130,7 +144,7 @@
 </head>
 <body>
   <header>
-    <h1>VDO.MultiCh.Comms</h1>
+    <h1>VDO.MultiCh.Comms <span id="header-version" class="header-version"></span></h1>
     <span id="device-label">Device: Default</span>
     <button id="open-settings">Settings</button>
   </header>
@@ -158,12 +172,13 @@
       <!-- Step 2: name your session and lines -->
       <div id="setup-step-2">
         <h2>Name your session</h2>
-        <p>This becomes the prefix for all room keys — use something short and event-specific.</p>
+        <p>This becomes the shared Comms room name — use something short and event-specific.</p>
         <div class="setup-field-row">
           <label>Event / session name</label>
           <input type="text" id="setup-event-name" placeholder="e.g. faire24, superbowl, show1" maxlength="20" />
           <div class="setup-preview" id="setup-key-preview"></div>
         </div>
+        <p style="font-size:12px;color:#888;text-align:left;">Name each party line — these become Comms groups within the room:</p>
         <div class="setup-lines-grid" id="setup-lines-grid">
           <!-- populated by JS -->
         </div>
@@ -173,6 +188,27 @@
 
     </div>
   </div>
+
+  <section id="comms-bar">
+    <img class="qr" id="qr-comms" alt="Comms QR code" />
+    <div class="comms-info">
+      <h2>Mobile join — single Comms link</h2>
+      <p>Room: <span class="comms-room" id="comms-room-label">…</span> · Tap groups in Comms to talk or listen</p>
+      <p id="comms-build-hint" class="comms-hint">URL must start with …/comms?room=</p>
+    </div>
+    <div class="comms-links">
+      <div class="comms-link-row">
+        <label>Comms</label>
+        <input type="text" readonly id="comms-join-url" />
+        <button id="comms-copy-btn" onclick="copyCommsLink()">Copy link</button>
+      </div>
+      <div class="comms-link-row">
+        <label>Director</label>
+        <a id="comms-director-link" href="#" target="_blank">Open ↗</a>
+        <button id="comms-director-copy" onclick="copyDirectorLink()">Copy</button>
+      </div>
+    </div>
+  </section>
 
   <div id="lines"></div>
 
@@ -200,6 +236,10 @@
           <label>Output channels <span id="output-ch-detected" style="font-size:10px;color:#555;"></span></label>
           <input type="number" id="output-ch-override" min="1" max="64" placeholder="Auto" style="width:80px;" />
         </div>
+      </div>
+      <div class="settings-row">
+        <label>Comms room password (optional)</label>
+        <input type="text" id="comms-password" placeholder="Leave blank for no password" />
       </div>
       <div class="settings-row">
         <label>VDO.ninja endpoint</label>

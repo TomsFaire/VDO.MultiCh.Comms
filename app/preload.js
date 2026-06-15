@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('api', {
   listAudioDevices: () => ipcRenderer.invoke('list-audio-devices'),
   startAudioCapture: (uid, nCh) => ipcRenderer.invoke('start-audio-capture', uid, nCh),
   stopAudioCapture: () => ipcRenderer.invoke('stop-audio-capture'),
-  connectLine: (id, url, channelId) => ipcRenderer.invoke('connect-line', { id, url, channelId }),
+  restartPlayback: () => ipcRenderer.invoke('restart-playback'),
+  playTestTone: (channel, ms) => ipcRenderer.invoke('play-test-tone', channel, ms),
+  connectLine: (id, url, inputChannel, outputChannel, gainOut, group) =>
+    ipcRenderer.invoke('connect-line', { id, url, inputChannel, outputChannel, gainOut, group }),
   disconnectLine: (id) => ipcRenderer.invoke('disconnect-line', id),
 });
