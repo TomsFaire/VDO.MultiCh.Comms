@@ -4,6 +4,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <map>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -129,12 +130,15 @@ struct AudioEngine {
   double                   testPhase{0.0};
 };
 
-static AudioEngine g_in;
-static AudioEngine g_out;
+// Per-session map — replaces g_in / g_out globals
+static std::map<std::string, AudioEngine> g_sessions;
+static std::mutex g_sessionsMutex;
 
-static void dispatchCaptureSamples(int ch, std::vector<float> samples) {
-  if (!g_in.capRunning || samples.empty() || !g_in.capTsfn) return;
-  g_in.capTsfn.NonBlockingCall(
+// ── audio processing helpers ──────────────────────────────────────────────────
+
+static void dispatchCaptureSamples(AudioEngine& eng, int ch, std::vector<float> samples) {
+  if (!eng.capRunning || samples.empty() || !eng.capTsfn) return;
+  eng.capTsfn.NonBlockingCall(
     [ch, s = std::move(samples)](Napi::Env env, Napi::Function cb) {
       auto arr = Napi::Float32Array::New(env, s.size());
       std::copy(s.begin(), s.end(), arr.Data());
@@ -143,7 +147,7 @@ static void dispatchCaptureSamples(int ch, std::vector<float> samples) {
   );
 }
 
-static void processInputBuffer(const AudioBufferList* inData, int maxChannels) {
+static void processInputBuffer(AudioEngine& eng, const AudioBufferList* inData, int maxChannels) {
   if (!inData) return;
 
   if (inData->mNumberBuffers == 1 && inData->mBuffers[0].mNumberChannels > 1) {
@@ -156,7 +160,7 @@ static void processInputBuffer(const AudioBufferList* inData, int maxChannels) {
       std::vector<float> samples(frameCount);
       for (int i = 0; i < frameCount; i++)
         samples[i] = data[i * nCh + ch];
-      dispatchCaptureSamples(ch, std::move(samples));
+      dispatchCaptureSamples(eng, ch, std::move(samples));
     }
     return;
   }
@@ -168,7 +172,7 @@ static void processInputBuffer(const AudioBufferList* inData, int maxChannels) {
     if (!buf.mData || n <= 0) continue;
     std::vector<float> samples(static_cast<const float*>(buf.mData),
                                static_cast<const float*>(buf.mData) + n);
-    dispatchCaptureSamples(ch, std::move(samples));
+    dispatchCaptureSamples(eng, ch, std::move(samples));
   }
 }
 
@@ -226,39 +230,74 @@ static void fillOutputBuffer(AudioEngine& eng, AudioBufferList* outData) {
   }
 }
 
-static OSStatus InputHalCallback(AudioDeviceID,
-                                  const AudioTimeStamp*,
-                                  const AudioBufferList* inData,
-                                  const AudioTimeStamp*,
-                                  AudioBufferList*,
-                                  const AudioTimeStamp*,
-                                  void*) {
-  if (g_in.capRunning) processInputBuffer(inData, g_in.capChannels);
+// ── per-session HAL callbacks ─────────────────────────────────────────────────
+// inClientData points to the session ID string stored in the AudioEngine itself
+// (we pass &eng.uid, which outlives the callback registration).
+
+static OSStatus SessionInputHalCallback(AudioDeviceID,
+                                        const AudioTimeStamp*,
+                                        const AudioBufferList* inData,
+                                        const AudioTimeStamp*,
+                                        AudioBufferList*,
+                                        const AudioTimeStamp*,
+                                        void* inClientData) {
+  const std::string* sidPtr = static_cast<const std::string*>(inClientData);
+  if (!sidPtr) return noErr;
+  // Acquire global lock to safely access the map, grab a pointer, then release.
+  AudioEngine* eng = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(*sidPtr);
+    if (it != g_sessions.end()) eng = &it->second;
+  }
+  if (eng && eng->capRunning)
+    processInputBuffer(*eng, inData, eng->capChannels);
   return noErr;
 }
 
-static OSStatus OutputHalCallback(AudioDeviceID,
-                                   const AudioTimeStamp*,
-                                   const AudioBufferList*,
-                                   const AudioTimeStamp*,
-                                   AudioBufferList* outData,
-                                   const AudioTimeStamp*,
-                                   void*) {
-  if (g_out.pbRunning) fillOutputBuffer(g_out, outData);
+static OSStatus SessionOutputHalCallback(AudioDeviceID,
+                                         const AudioTimeStamp*,
+                                         const AudioBufferList*,
+                                         const AudioTimeStamp*,
+                                         AudioBufferList* outData,
+                                         const AudioTimeStamp*,
+                                         void* inClientData) {
+  const std::string* sidPtr = static_cast<const std::string*>(inClientData);
+  if (!sidPtr) return noErr;
+  AudioEngine* eng = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(*sidPtr);
+    if (it != g_sessions.end()) eng = &it->second;
+  }
+  if (eng && eng->pbRunning)
+    fillOutputBuffer(*eng, outData);
   return noErr;
 }
 
-static OSStatus DuplexHalCallback(AudioDeviceID,
-                                   const AudioTimeStamp*,
-                                   const AudioBufferList* inData,
-                                   const AudioTimeStamp*,
-                                   AudioBufferList* outData,
-                                   const AudioTimeStamp*,
-                                   void*) {
-  if (g_in.capRunning) processInputBuffer(inData, g_in.capChannels);
-  if (g_in.pbRunning) fillOutputBuffer(g_in, outData);
+static OSStatus SessionDuplexHalCallback(AudioDeviceID,
+                                         const AudioTimeStamp*,
+                                         const AudioBufferList* inData,
+                                         const AudioTimeStamp*,
+                                         AudioBufferList* outData,
+                                         const AudioTimeStamp*,
+                                         void* inClientData) {
+  const std::string* sidPtr = static_cast<const std::string*>(inClientData);
+  if (!sidPtr) return noErr;
+  AudioEngine* eng = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(*sidPtr);
+    if (it != g_sessions.end()) eng = &it->second;
+  }
+  if (eng) {
+    if (eng->capRunning) processInputBuffer(*eng, inData, eng->capChannels);
+    if (eng->pbRunning)  fillOutputBuffer(*eng, outData);
+  }
   return noErr;
 }
+
+// ── engine lifecycle helpers ──────────────────────────────────────────────────
 
 static void stopEngine(AudioEngine& eng) {
   if (eng.procId) {
@@ -306,10 +345,281 @@ static void pushPlaybackRing(AudioEngine& eng, int ch, const float* data, size_t
   }
 }
 
+// Returns pointer to first playback-capable session (legacy helper for
+// startAudio "default" path and old callers of PushPlaybackSamples).
 static AudioEngine* playbackEngine() {
-  if (g_in.pbRunning) return &g_in;
-  if (g_out.pbRunning) return &g_out;
+  // Check "default" first for backwards compat
+  auto it = g_sessions.find("default");
+  if (it != g_sessions.end() && (it->second.pbRunning || it->second.capRunning))
+    return &it->second;
+  // Fall back to any session with playback running
+  for (auto& kv : g_sessions) {
+    if (kv.second.pbRunning) return &kv.second;
+  }
   return nullptr;
+}
+
+// ── startSession / stopSession implementation ─────────────────────────────────
+
+// Core implementation shared by StartSession and startAudioImpl("default", ...)
+// capUid/pbUid conflict check (capUid already claimed by another active session)
+// is done by the caller.
+static Napi::Value startSessionImpl(Napi::Env env,
+                                    const std::string& sessionId,
+                                    const std::string& capUid,
+                                    int capCh,
+                                    const std::string& pbUid,
+                                    int pbCh,
+                                    Napi::Function capCb) {
+  const bool wantCap = !capUid.empty() && capCh > 0;
+  const bool wantPb  = !pbUid.empty()  && pbCh  > 0;
+  if (!wantCap && !wantPb) return env.Undefined();
+
+  // Check that capUid is not already claimed by another active session
+  if (wantCap) {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    for (auto& kv : g_sessions) {
+      if (kv.first == sessionId) continue; // same session — will be replaced
+      if (kv.second.capRunning && kv.second.uid == capUid) {
+        Napi::Error::New(env,
+          "capture device " + capUid + " already in use by session " + kv.first
+        ).ThrowAsJavaScriptException();
+        return env.Undefined();
+      }
+    }
+  }
+
+  // Stop any existing instance of this session
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(sessionId);
+    if (it != g_sessions.end()) {
+      stopEngine(it->second);
+      g_sessions.erase(it);
+    }
+    // Insert a fresh engine; uid is set below after we configure the device
+    g_sessions[sessionId]; // default-construct
+  }
+
+  // From here we work on the engine directly. The map entry outlives this
+  // function because we only erase on stopSession/startSession conflict above.
+  AudioEngine* eng = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    eng = &g_sessions[sessionId];
+  }
+
+  if (wantCap && wantPb && capUid == pbUid) {
+    // Duplex on same device
+    AudioDeviceID devId = findDeviceByUID(capUid);
+    if (devId == kAudioDeviceUnknown) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "device not found: " + capUid).ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    int detIn  = getChannelCount(devId, kAudioDevicePropertyScopeInput);
+    int detOut = getChannelCount(devId, kAudioDevicePropertyScopeOutput);
+    if (detIn  > 0 && capCh > detIn)  capCh = detIn;
+    if (detOut > 0 && pbCh  > detOut) pbCh  = detOut;
+
+    eng->deviceSampleRate = configureDeviceSampleRate(devId);
+    fprintf(stderr, "[session:%s] CoreAudio duplex rate: %.0f Hz (source %.0f Hz)\n",
+            sessionId.c_str(), eng->deviceSampleRate, kSourceSampleRate);
+
+    eng->deviceId   = devId;
+    eng->uid        = sessionId; // store sessionId in uid so callbacks can look up by it
+    eng->capChannels = capCh;
+    eng->pbChannels  = pbCh;
+    if (wantCap)
+      eng->capTsfn = Napi::ThreadSafeFunction::New(env, capCb, "CoreAudioCapture", 0, 1);
+    resetPlaybackState(*eng);
+    eng->capRunning = wantCap;
+    eng->pbRunning  = wantPb;
+
+    // Pass &eng->uid as clientData so the per-session callback can find its session
+    OSStatus err = AudioDeviceCreateIOProcID(devId, SessionDuplexHalCallback,
+                                             &eng->uid, &eng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*eng);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "duplex AudioDeviceCreateIOProcID failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    err = AudioDeviceStart(devId, eng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*eng);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "duplex AudioDeviceStart failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    return env.Undefined();
+  }
+
+  if (wantCap) {
+    AudioDeviceID devId = findDeviceByUID(capUid);
+    if (devId == kAudioDeviceUnknown) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "capture device not found: " + capUid).ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    int detIn = getChannelCount(devId, kAudioDevicePropertyScopeInput);
+    if (detIn > 0 && capCh > detIn) capCh = detIn;
+    configureDeviceSampleRate(devId);
+    eng->deviceId    = devId;
+    eng->uid         = sessionId;
+    eng->capChannels = capCh;
+    eng->capTsfn     = Napi::ThreadSafeFunction::New(env, capCb, "CoreAudioCapture", 0, 1);
+    eng->capRunning  = true;
+    OSStatus err = AudioDeviceCreateIOProcID(devId, SessionInputHalCallback,
+                                             &eng->uid, &eng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*eng);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "capture create failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    err = AudioDeviceStart(devId, eng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*eng);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "capture start failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+  }
+
+  if (wantPb) {
+    AudioDeviceID devId = findDeviceByUID(pbUid);
+    if (devId == kAudioDeviceUnknown) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*eng);
+      g_sessions.erase(sessionId);
+      Napi::Error::New(env, "playback device not found: " + pbUid).ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    int detOut = getChannelCount(devId, kAudioDevicePropertyScopeOutput);
+    if (detOut > 0 && pbCh > detOut) pbCh = detOut;
+    // For capture-only sessions that also want playback on a separate device,
+    // we need a second AudioEngine. For now, store playback on the same engine
+    // (the capture device entry) if capture is already set, otherwise use the
+    // session engine for playback only.
+    AudioEngine* pbEng = eng;
+    if (wantCap && capUid != pbUid) {
+      // Separate playback device: create a separate entry keyed by sessionId+"_pb"
+      std::string pbKey = sessionId + "_pb";
+      {
+        std::lock_guard<std::mutex> lk(g_sessionsMutex);
+        g_sessions[pbKey]; // default-construct
+        pbEng = &g_sessions[pbKey];
+      }
+      pbEng->uid = pbKey;
+    }
+    pbEng->deviceSampleRate = configureDeviceSampleRate(devId);
+    pbEng->deviceId   = devId;
+    pbEng->pbChannels = pbCh;
+    resetPlaybackState(*pbEng);
+    pbEng->pbRunning  = true;
+    OSStatus err = AudioDeviceCreateIOProcID(devId, SessionOutputHalCallback,
+                                             &pbEng->uid, &pbEng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*pbEng);
+      if (pbEng != eng) g_sessions.erase(pbEng->uid);
+      Napi::Error::New(env, "playback create failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    err = AudioDeviceStart(devId, pbEng->procId);
+    if (err != noErr) {
+      std::lock_guard<std::mutex> lk(g_sessionsMutex);
+      stopEngine(*pbEng);
+      if (pbEng != eng) g_sessions.erase(pbEng->uid);
+      Napi::Error::New(env, "playback start failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+  }
+
+  return env.Undefined();
+}
+
+// ── N-API: startSession / stopSession ────────────────────────────────────────
+
+// startSession(sessionId, capUid, capCh, pbUid, pbCh, captureCb)
+static Napi::Value StartSession(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  std::string sessionId = info[0].As<Napi::String>();
+  std::string capUid    = info[1].As<Napi::String>();
+  int         capCh     = info[2].As<Napi::Number>().Int32Value();
+  std::string pbUid     = info[3].As<Napi::String>();
+  int         pbCh      = info[4].As<Napi::Number>().Int32Value();
+  Napi::Function capCb  = info[5].As<Napi::Function>();
+  return startSessionImpl(env, sessionId, capUid, capCh, pbUid, pbCh, capCb);
+}
+
+// stopSession(sessionId)
+static Napi::Value StopSession(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  std::string sessionId = info[0].As<Napi::String>();
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  // Also stop the associated _pb engine if it exists
+  std::string pbKey = sessionId + "_pb";
+  auto pbIt = g_sessions.find(pbKey);
+  if (pbIt != g_sessions.end()) {
+    stopEngine(pbIt->second);
+    g_sessions.erase(pbIt);
+  }
+  auto it = g_sessions.find(sessionId);
+  if (it != g_sessions.end()) {
+    stopEngine(it->second);
+    g_sessions.erase(it);
+  }
+  return env.Undefined();
+}
+
+// ── legacy startAudio/stopAudio (delegate to "default" session) ───────────────
+
+static Napi::Value startAudioImpl(Napi::Env env,
+                                  const std::string& capUid,
+                                  int capCh,
+                                  const std::string& pbUid,
+                                  int pbCh,
+                                  Napi::Function capCb) {
+  // Stop only the "default" session (and its _pb companion) before restarting it
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    std::string pbKey = "default_pb";
+    auto pbIt = g_sessions.find(pbKey);
+    if (pbIt != g_sessions.end()) { stopEngine(pbIt->second); g_sessions.erase(pbIt); }
+    auto it = g_sessions.find("default");
+    if (it != g_sessions.end()) { stopEngine(it->second); g_sessions.erase(it); }
+  }
+  return startSessionImpl(env, "default", capUid, capCh, pbUid, pbCh, capCb);
+}
+
+static Napi::Value StopAudio(const Napi::CallbackInfo& info) {
+  // stopAudio stops only the "default" session for backward compat
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  std::string pbKey = "default_pb";
+  auto pbIt = g_sessions.find(pbKey);
+  if (pbIt != g_sessions.end()) { stopEngine(pbIt->second); g_sessions.erase(pbIt); }
+  auto it = g_sessions.find("default");
+  if (it != g_sessions.end()) { stopEngine(it->second); g_sessions.erase(it); }
+  return info.Env().Undefined();
+}
+
+// startAudio(captureUid, capCh, playbackUid, pbCh, captureCallback)
+static Napi::Value StartAudio(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  return startAudioImpl(env,
+    info[0].As<Napi::String>(),
+    info[1].As<Napi::Number>().Int32Value(),
+    info[2].As<Napi::String>(),
+    info[3].As<Napi::Number>().Int32Value(),
+    info[4].As<Napi::Function>());
 }
 
 // ── N-API exports ─────────────────────────────────────────────────────────────
@@ -372,151 +682,73 @@ static Napi::Value SetDefaultOutputDevice(const Napi::CallbackInfo& info) {
   return Napi::Boolean::New(env, true);
 }
 
-static void stopAllEngines() {
-  stopEngine(g_in);
-  stopEngine(g_out);
-}
-
-static Napi::Value startAudioImpl(Napi::Env env,
-                                  const std::string& capUid,
-                                  int capCh,
-                                  const std::string& pbUid,
-                                  int pbCh,
-                                  Napi::Function capCb) {
-  stopAllEngines();
-
-  const bool wantCap = !capUid.empty() && capCh > 0;
-  const bool wantPb  = !pbUid.empty() && pbCh > 0;
-  if (!wantCap && !wantPb) return env.Undefined();
-
-  if (wantCap && wantPb && capUid == pbUid) {
-    AudioDeviceID devId = findDeviceByUID(capUid);
-    if (devId == kAudioDeviceUnknown) {
-      Napi::Error::New(env, "device not found: " + capUid).ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    int detIn  = getChannelCount(devId, kAudioDevicePropertyScopeInput);
-    int detOut = getChannelCount(devId, kAudioDevicePropertyScopeOutput);
-    if (detIn > 0 && capCh > detIn) capCh = detIn;
-    if (detOut > 0 && pbCh > detOut) pbCh = detOut;
-
-    g_in.deviceSampleRate = configureDeviceSampleRate(devId);
-    fprintf(stderr, "CoreAudio duplex rate: %.0f Hz (source %.0f Hz)\n",
-            g_in.deviceSampleRate, kSourceSampleRate);
-
-    g_in.deviceId = devId;
-    g_in.uid = capUid;
-    g_in.capChannels = capCh;
-    g_in.pbChannels = pbCh;
-    if (wantCap)
-      g_in.capTsfn = Napi::ThreadSafeFunction::New(env, capCb, "CoreAudioCapture", 0, 1);
-    resetPlaybackState(g_in);
-    g_in.capRunning = wantCap;
-    g_in.pbRunning = wantPb;
-
-    OSStatus err = AudioDeviceCreateIOProcID(devId, DuplexHalCallback, nullptr, &g_in.procId);
-    if (err != noErr) {
-      stopEngine(g_in);
-      Napi::Error::New(env, "duplex AudioDeviceCreateIOProcID failed").ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    err = AudioDeviceStart(devId, g_in.procId);
-    if (err != noErr) {
-      stopEngine(g_in);
-      Napi::Error::New(env, "duplex AudioDeviceStart failed").ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    return env.Undefined();
+// clearPlaybackChannel(channel [, sessionId="default"])
+static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  int ch = info[0].As<Napi::Number>().Int32Value();
+  std::string sessionId = "default";
+  if (info.Length() > 1 && info[1].IsString())
+    sessionId = info[1].As<Napi::String>();
+  AudioEngine* eng = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(sessionId);
+    if (it != g_sessions.end()) eng = &it->second;
   }
-
-  if (wantCap) {
-    AudioDeviceID devId = findDeviceByUID(capUid);
-    if (devId == kAudioDeviceUnknown) {
-      Napi::Error::New(env, "capture device not found: " + capUid).ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    int detIn = getChannelCount(devId, kAudioDevicePropertyScopeInput);
-    if (detIn > 0 && capCh > detIn) capCh = detIn;
-    configureDeviceSampleRate(devId);
-    g_in.deviceId = devId;
-    g_in.uid = capUid;
-    g_in.capChannels = capCh;
-    g_in.capTsfn = Napi::ThreadSafeFunction::New(env, capCb, "CoreAudioCapture", 0, 1);
-    g_in.capRunning = true;
-    OSStatus err = AudioDeviceCreateIOProcID(devId, InputHalCallback, nullptr, &g_in.procId);
-    if (err != noErr) { stopEngine(g_in); Napi::Error::New(env, "capture create failed").ThrowAsJavaScriptException(); return env.Undefined(); }
-    err = AudioDeviceStart(devId, g_in.procId);
-    if (err != noErr) { stopEngine(g_in); Napi::Error::New(env, "capture start failed").ThrowAsJavaScriptException(); return env.Undefined(); }
+  if (!eng) {
+    // Legacy fallback
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    eng = playbackEngine();
   }
-
-  if (wantPb) {
-    AudioDeviceID devId = findDeviceByUID(pbUid);
-    if (devId == kAudioDeviceUnknown) {
-      Napi::Error::New(env, "playback device not found: " + pbUid).ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    int detOut = getChannelCount(devId, kAudioDevicePropertyScopeOutput);
-    if (detOut > 0 && pbCh > detOut) pbCh = detOut;
-    g_out.deviceSampleRate = configureDeviceSampleRate(devId);
-    g_out.deviceId = devId;
-    g_out.uid = pbUid;
-    g_out.pbChannels = pbCh;
-    resetPlaybackState(g_out);
-    g_out.pbRunning = true;
-    OSStatus err = AudioDeviceCreateIOProcID(devId, OutputHalCallback, nullptr, &g_out.procId);
-    if (err != noErr) { stopEngine(g_out); Napi::Error::New(env, "playback create failed").ThrowAsJavaScriptException(); return env.Undefined(); }
-    err = AudioDeviceStart(devId, g_out.procId);
-    if (err != noErr) { stopEngine(g_out); Napi::Error::New(env, "playback start failed").ThrowAsJavaScriptException(); return env.Undefined(); }
-  }
-
+  if (!eng) return env.Undefined();
+  clearPlaybackChannel(*eng, ch);
   return env.Undefined();
 }
 
-static Napi::Value StopAudio(const Napi::CallbackInfo& info) {
-  stopAllEngines();
-  return info.Env().Undefined();
-}
-
-// startAudio(captureUid, capCh, playbackUid, pbCh, captureCallback)
-static Napi::Value StartAudio(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  return startAudioImpl(env,
-    info[0].As<Napi::String>(),
-    info[1].As<Napi::Number>().Int32Value(),
-    info[2].As<Napi::String>(),
-    info[3].As<Napi::Number>().Int32Value(),
-    info[4].As<Napi::Function>());
-}
-
-static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
-  AudioEngine* eng = playbackEngine();
-  if (!eng) return info.Env().Undefined();
-  int ch = info[0].As<Napi::Number>().Int32Value();
-  clearPlaybackChannel(*eng, ch);
-  return info.Env().Undefined();
-}
-
+// pushPlaybackSamples(sessionIdOrChannel, channel, data, gain)
+//   - If first arg is a string: new per-session form: (sessionId, channel, data [, gain])
+//   - If first arg is a number: legacy form: (channel, data [, gain]) — uses "default" session
 static Napi::Value PushPlaybackSamples(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  AudioEngine* eng = playbackEngine();
+
+  AudioEngine* eng = nullptr;
+  int ch;
+  float gain;
+  uint32_t dataArgIdx;
+
+  if (info[0].IsString()) {
+    // New form: (sessionId, channel, data [, gain])
+    std::string sessionId = info[0].As<Napi::String>();
+    ch          = info[1].As<Napi::Number>().Int32Value();
+    gain        = info.Length() > 3 ? info[3].As<Napi::Number>().FloatValue() : 1.f;
+    dataArgIdx  = 2;
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(sessionId);
+    if (it != g_sessions.end()) eng = &it->second;
+  } else {
+    // Legacy form: (channel, data [, gain]) — use "default" or any running session
+    ch         = info[0].As<Napi::Number>().Int32Value();
+    gain       = info.Length() > 2 ? info[2].As<Napi::Number>().FloatValue() : 1.f;
+    dataArgIdx = 1;
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    eng = playbackEngine();
+  }
+
   if (!eng) return env.Undefined();
 
-  int ch = info[0].As<Napi::Number>().Int32Value();
-  float gain = info.Length() > 2 ? info[2].As<Napi::Number>().FloatValue() : 1.f;
-
-  if (info[1].IsTypedArray()) {
-    auto arr = info[1].As<Napi::Float32Array>();
+  if (info[dataArgIdx].IsTypedArray()) {
+    auto arr = info[dataArgIdx].As<Napi::Float32Array>();
     size_t n = arr.ElementLength();
     if (n > 0) pushPlaybackRing(*eng, ch, arr.Data(), n, gain);
-  } else if (info[1].IsBuffer()) {
-    auto buf = info[1].As<Napi::Buffer<uint8_t>>();
+  } else if (info[dataArgIdx].IsBuffer()) {
+    auto buf = info[dataArgIdx].As<Napi::Buffer<uint8_t>>();
     size_t nFloats = buf.Length() / sizeof(float);
     if (nFloats > 0) {
       const float* data = reinterpret_cast<const float*>(buf.Data());
       pushPlaybackRing(*eng, ch, data, nFloats, gain);
     }
-  } else if (info[1].IsArray()) {
-    auto arr = info[1].As<Napi::Array>();
+  } else if (info[dataArgIdx].IsArray()) {
+    auto arr = info[dataArgIdx].As<Napi::Array>();
     std::vector<float> tmp(arr.Length());
     for (uint32_t i = 0; i < arr.Length(); i++)
       tmp[i] = arr.Get(i).As<Napi::Number>().FloatValue();
@@ -526,6 +758,7 @@ static Napi::Value PushPlaybackSamples(const Napi::CallbackInfo& info) {
 }
 
 static Napi::Value PlayTestTone(const Napi::CallbackInfo& info) {
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
   AudioEngine* eng = playbackEngine();
   if (!eng) return info.Env().Undefined();
   int ch = info[0].As<Napi::Number>().Int32Value();
@@ -572,6 +805,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("playTestTone",              Napi::Function::New(env, PlayTestTone));
   exports.Set("setDefaultOutputDevice",    Napi::Function::New(env, SetDefaultOutputDevice));
   exports.Set("getDefaultOutputDeviceUID", Napi::Function::New(env, GetDefaultOutputDeviceUID));
+  exports.Set("startSession",              Napi::Function::New(env, StartSession));
+  exports.Set("stopSession",               Napi::Function::New(env, StopSession));
   return exports;
 }
 NODE_API_MODULE(coreaudio, Init)
