@@ -67,6 +67,10 @@
     .channel-row label { width: 24px; }
     .channel-row select { flex: 1; background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4px 6px; border-radius: 4px; font-size: 12px; }
 
+    .device-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .device-row label { width: 68px; font-size: 0.82em; color: #aaa; }
+    .device-row select { flex: 1; font-size: 0.82em; background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4px 6px; border-radius: 4px; }
+
     .connect-btn { padding: 8px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; background: #2a5c2a; color: #7ec87e; transition: background 0.2s; }
     .connect-btn.connected { background: #5c2a2a; color: #c87e7e; }
     .connect-btn:hover { filter: brightness(1.2); }
@@ -81,7 +85,7 @@
     /* Settings overlay */
     #settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 100; }
     #settings-overlay.open { display: flex; }
-    .settings-box { background: #242424; border: 1px solid #333; border-radius: 10px; padding: 24px; width: 420px; display: flex; flex-direction: column; gap: 16px; }
+    .settings-box { background: #242424; border: 1px solid #333; border-radius: 10px; padding: 24px; width: 460px; max-height: calc(100vh - 80px); overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
     .settings-box h2 { font-size: 15px; font-weight: 600; }
     .settings-row { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
     .settings-row label { color: #aaa; }
@@ -226,13 +230,13 @@
     <div class="settings-box">
       <h2>Settings</h2>
       <div class="settings-row">
-        <label>Input device (microphone / line in)</label>
+        <label>Default input device (fallback)</label>
         <select id="input-device-select">
           <option value="">Default</option>
         </select>
       </div>
       <div class="settings-row">
-        <label>Output device (speakers / line out)</label>
+        <label>Default output device (fallback)</label>
         <select id="output-device-select">
           <option value="">Default</option>
         </select>

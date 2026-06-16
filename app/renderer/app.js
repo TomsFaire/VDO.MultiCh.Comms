@@ -42,6 +42,18 @@ function populateDeviceDropdown(select, devices, uidKey, nameKey) {
   });
 }
 
+// Populate per-line device dropdowns
+function populateLineDeviceDropdown(select, devices, currentUid) {
+  select.innerHTML = '<option value="">Using global</option>';
+  devices.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.uid;
+    opt.textContent = `${d.name} (${d.channels}ch)`;
+    if (d.uid === currentUid) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
 function findInputDevice() {
   if (config.input_device_uid) {
     return shimDevices.inputs.find(d => d.uid === config.input_device_uid);
@@ -181,7 +193,7 @@ function withPassword(params) {
 
 function applyWebRtcParams(params) {
   if (config.webrtc_turn_off !== false) params.set('turn', 'off');
-  if (config.webrtc_stun_only || config.webrtc_lan_mode !== false) params.set('stunonly', '');
+  if (config.webrtc_stun_only || config.webrtc_lan_mode !== false) params.set('stunonly', '1');
   return params;
 }
 
@@ -260,6 +272,33 @@ function renderCommsBar() {
 
 function renderLines() {
   const container = document.getElementById('lines');
+
+  if (!container._deviceListenersAttached) {
+    container._deviceListenersAttached = true;
+
+    container.addEventListener('change', e => {
+      const el = e.target;
+      if (!el.matches('select[id^="dev-in-"]')) return;
+      const id = parseInt(el.dataset.line);
+      const line = config.lines.find(l => l.id === id);
+      if (line) {
+        line.input_device_uid = el.value || null;
+        window.api.saveConfig(config);
+      }
+    });
+
+    container.addEventListener('change', e => {
+      const el = e.target;
+      if (!el.matches('select[id^="dev-out-"]')) return;
+      const id = parseInt(el.dataset.line);
+      const line = config.lines.find(l => l.id === id);
+      if (line) {
+        line.output_device_uid = el.value || null;
+        window.api.saveConfig(config);
+      }
+    });
+  }
+
   container.innerHTML = '';
 
   config.lines.forEach((line) => {
@@ -277,6 +316,18 @@ function renderLines() {
         <div class="meter"><div class="meter-bar meter-bar-out" id="meter-out-${line.id}"></div></div>
         <div class="meter-labels"><span>mic</span><span>remote</span></div>
       </div>
+      <div class="device-row">
+        <label>In device</label>
+        <select id="dev-in-${line.id}" data-line="${line.id}" data-dir="in">
+          <option value="">Using global</option>
+        </select>
+      </div>
+      <div class="device-row">
+        <label>Out device</label>
+        <select id="dev-out-${line.id}" data-line="${line.id}" data-dir="out">
+          <option value="">Using global</option>
+        </select>
+      </div>
       <div class="channel-row">
         <label>In</label>
         <select id="ch-in-${line.id}" data-line="${line.id}" data-dir="in" title="Hardware input 1–${outputChannelCount}">
@@ -292,22 +343,34 @@ function renderLines() {
       </div>
       <div class="gain-row">
         <span>Gain in</span>
-        <input type="range" min="0" max="3" step="0.05" value="${line.gain_in}" data-line="${line.id}" data-dir="in" />
+        <input type="range" min="0" max="10" step="0.05" value="${line.gain_in}" data-line="${line.id}" data-dir="in" />
         <span id="gain-in-val-${line.id}">${line.gain_in.toFixed(2)}</span>
       </div>
       <div class="gain-row">
         <span>Gain out</span>
-        <input type="range" min="0" max="3" step="0.05" value="${line.gain_out}" data-line="${line.id}" data-dir="out" />
+        <input type="range" min="0" max="10" step="0.05" value="${line.gain_out}" data-line="${line.id}" data-dir="out" />
         <span id="gain-out-val-${line.id}">${line.gain_out.toFixed(2)}</span>
       </div>
       <button class="connect-btn" id="connect-${line.id}" onclick="toggleConnect(${line.id})">Connect</button>
     `;
 
     container.appendChild(panel);
+
+    // Populate device dropdowns for this line
+    populateLineDeviceDropdown(
+      document.getElementById(`dev-in-${line.id}`),
+      shimDevices.inputs,
+      line.input_device_uid || ''
+    );
+    populateLineDeviceDropdown(
+      document.getElementById(`dev-out-${line.id}`),
+      shimDevices.outputs,
+      line.output_device_uid || ''
+    );
   });
 
   // Channel select listeners
-  document.querySelectorAll('select[data-line]').forEach((el) => {
+  document.querySelectorAll('select[data-line][id^="ch-"]').forEach((el) => {
     el.addEventListener('change', (e) => {
       const id = parseInt(e.target.dataset.line);
       const dir = e.target.dataset.dir;
@@ -320,7 +383,7 @@ function renderLines() {
     });
   });
 
-  // Gain slider listeners
+  // Gain slider listeners — update display live, save only on release
   document.querySelectorAll('input[type=range]').forEach((el) => {
     el.addEventListener('input', (e) => {
       const id = parseInt(e.target.dataset.line);
@@ -335,7 +398,11 @@ function renderLines() {
         line.gain_out = val;
         document.getElementById(`gain-out-val-${id}`).textContent = val.toFixed(2);
       }
-      window.api.saveConfig(config);
+    });
+    el.addEventListener('change', (e) => {
+      const id = parseInt(e.target.dataset.line);
+      const line = config.lines.find((l) => l.id === id);
+      if (line) window.api.saveConfig(config);
     });
   });
 
@@ -373,7 +440,6 @@ function renderLines() {
 async function testOutChannel(id) {
   const line = config.lines.find((l) => l.id === id);
   if (!line) return;
-  await window.api.restartPlayback();
   const res = await window.api.playTestTone(line.output_channel, 800);
   if (!res.ok) alert('Test tone failed: ' + (res.error || 'unknown'));
 }
@@ -612,6 +678,18 @@ function setupSettings() {
     await connectShim();
     populateDeviceDropdown(document.getElementById('input-device-select'), shimDevices.inputs, 'input_device_uid', 'input_device');
     populateDeviceDropdown(document.getElementById('output-device-select'), shimDevices.outputs, 'output_device_uid', 'output_device');
+    config.lines.forEach(line => {
+      populateLineDeviceDropdown(
+        document.getElementById(`dev-in-${line.id}`),
+        shimDevices.inputs,
+        line.input_device_uid || ''
+      );
+      populateLineDeviceDropdown(
+        document.getElementById(`dev-out-${line.id}`),
+        shimDevices.outputs,
+        line.output_device_uid || ''
+      );
+    });
     // Show detected channel counts as hints; pre-fill overrides from config
     const detected = queryChannelCounts();
     document.getElementById('input-ch-detected').textContent = `(detected: ${detected.inCount})`;
@@ -706,11 +784,16 @@ function setupSettings() {
     } else {
       await window.api.stopAudioCapture();
     }
-    await window.api.restartPlayback();
     updateDeviceLabel();
     overlay.classList.remove('open');
     renderCommsBar();
   });
+}
+
+function meterColor(pct, isInput) {
+  if (pct >= 95) return '#e53935';
+  if (pct >= 60) return '#f9a825';
+  return isInput ? '#4caf50' : '#4a8abf';
 }
 
 window.api.onAudioLevels(({ capture, playback }) => {
@@ -718,8 +801,16 @@ window.api.onAudioLevels(({ capture, playback }) => {
   config.lines.forEach((line) => {
     const inBar  = document.getElementById(`meter-in-${line.id}`);
     const outBar = document.getElementById(`meter-out-${line.id}`);
-    if (inBar)  inBar.style.width  = `${Math.min(100, (capture[line.input_channel]  || 0) * 200)}%`;
-    if (outBar) outBar.style.width = `${Math.min(100, (playback[line.output_channel] || 0) * 200)}%`;
+    if (inBar) {
+      const pct = Math.min(100, (capture[line.input_channel]  || 0) * 200);
+      inBar.style.width = `${pct}%`;
+      inBar.style.background = meterColor(pct, true);
+    }
+    if (outBar) {
+      const pct = Math.min(100, (playback[line.output_channel] || 0) * 200);
+      outBar.style.width = `${pct}%`;
+      outBar.style.background = meterColor(pct, false);
+    }
   });
 });
 
