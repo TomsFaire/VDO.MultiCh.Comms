@@ -276,7 +276,7 @@ const DEFAULT_CONFIG = {
   instance_name: 'default',
   comms_room: 'default',
   comms_password: '',
-  vdo_base_url: 'https://vdo.ninja',
+  vdo_base_url: 'https://vdo.whatadickmove.com',
   input_device: '',
   output_device: '',
   input_device_uid: '',

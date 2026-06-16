@@ -186,12 +186,12 @@ function applyWebRtcParams(params) {
 }
 
 function commsJoinUrl() {
-  const params = applyWebRtcParams(withPassword(new URLSearchParams({
+  const params = withPassword(new URLSearchParams({
     room: getCommsRoom(),
     groups: allGroups(),
     groupmode: '1',
-    sampleRate: '48000',
-  })));
+  }));
+  if (config.webrtc_turn_off !== false) params.set('turn', 'off');
   return `${vdoBaseUrl()}/comms?${params}`;
 }
 
@@ -402,6 +402,20 @@ async function toggleConnect(id) {
   } else {
     await window.api.disconnectLine(id);
   }
+}
+
+async function copyQrImage() {
+  const img = document.getElementById('qr-comms');
+  if (!img?.src) return;
+  try {
+    const blob = await (await fetch(img.src)).blob();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+  } catch (_) {
+    navigator.clipboard.writeText(document.getElementById('comms-join-url').value);
+  }
+  const wrap = img.closest('.qr-wrap');
+  wrap.classList.add('copied');
+  setTimeout(() => wrap.classList.remove('copied'), 1200);
 }
 
 function copyCommsLink() {
