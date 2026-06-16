@@ -127,7 +127,7 @@ struct AudioEngine {
   // test tone injection
   std::atomic<int>         testChannel{-1};
   std::atomic<int>         testSamplesLeft{0};
-  double                   testPhase{0.0};
+  std::atomic<double>      testPhase{0.0};
 };
 
 // Per-session map — replaces g_in / g_out globals
@@ -190,8 +190,10 @@ static float popPlaybackSample(AudioEngine& eng, int ch) {
     int left = eng.testSamplesLeft.load();
     if (left > 0) {
       eng.testSamplesLeft = left - 1;
-      eng.testPhase += 2.0 * M_PI * 440.0 / eng.deviceSampleRate;
-      return (float)(0.2 * sin(eng.testPhase));
+      double phase = eng.testPhase.load(std::memory_order_relaxed);
+      phase += 2.0 * M_PI * 440.0 / eng.deviceSampleRate;
+      eng.testPhase.store(phase, std::memory_order_relaxed);
+      return (float)(0.2 * sin(phase));
     }
     eng.testChannel = -1;
   }
@@ -243,15 +245,14 @@ static OSStatus SessionInputHalCallback(AudioDeviceID,
                                         void* inClientData) {
   const std::string* sidPtr = static_cast<const std::string*>(inClientData);
   if (!sidPtr) return noErr;
-  // Acquire global lock to safely access the map, grab a pointer, then release.
-  AudioEngine* eng = nullptr;
-  {
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(*sidPtr);
-    if (it != g_sessions.end()) eng = &it->second;
-  }
-  if (eng && eng->capRunning)
-    processInputBuffer(*eng, inData, eng->capChannels);
+  // Hold g_sessionsMutex for the full lookup + I/O so that stopSession cannot
+  // erase the entry (or call AudioDeviceStop) while we are using the engine.
+  // AudioDeviceStop blocks until any active callback exits, and since stop
+  // acquires the proc/deviceId outside this lock first, there is no deadlock.
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  auto it = g_sessions.find(*sidPtr);
+  if (it != g_sessions.end() && it->second.capRunning)
+    processInputBuffer(it->second, inData, it->second.capChannels);
   return noErr;
 }
 
@@ -264,14 +265,10 @@ static OSStatus SessionOutputHalCallback(AudioDeviceID,
                                          void* inClientData) {
   const std::string* sidPtr = static_cast<const std::string*>(inClientData);
   if (!sidPtr) return noErr;
-  AudioEngine* eng = nullptr;
-  {
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(*sidPtr);
-    if (it != g_sessions.end()) eng = &it->second;
-  }
-  if (eng && eng->pbRunning)
-    fillOutputBuffer(*eng, outData);
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  auto it = g_sessions.find(*sidPtr);
+  if (it != g_sessions.end() && it->second.pbRunning)
+    fillOutputBuffer(it->second, outData);
   return noErr;
 }
 
@@ -284,15 +281,12 @@ static OSStatus SessionDuplexHalCallback(AudioDeviceID,
                                          void* inClientData) {
   const std::string* sidPtr = static_cast<const std::string*>(inClientData);
   if (!sidPtr) return noErr;
-  AudioEngine* eng = nullptr;
-  {
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(*sidPtr);
-    if (it != g_sessions.end()) eng = &it->second;
-  }
-  if (eng) {
-    if (eng->capRunning) processInputBuffer(*eng, inData, eng->capChannels);
-    if (eng->pbRunning)  fillOutputBuffer(*eng, outData);
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  auto it = g_sessions.find(*sidPtr);
+  if (it != g_sessions.end()) {
+    AudioEngine& eng = it->second;
+    if (eng.capRunning) processInputBuffer(eng, inData, eng.capChannels);
+    if (eng.pbRunning)  fillOutputBuffer(eng, outData);
   }
   return noErr;
 }
@@ -309,7 +303,8 @@ static void stopEngine(AudioEngine& eng) {
   eng.pbRunning = false;
   if (eng.capTsfn) eng.capTsfn.Release();
   eng.deviceId = kAudioDeviceUnknown;
-  eng.uid.clear();
+  // Do NOT clear eng.uid — it is passed as clientData to the HAL and must
+  // remain valid until after AudioDeviceDestroyIOProcID returns above.
 }
 
 static void resetPlaybackState(AudioEngine& eng) {
@@ -347,10 +342,12 @@ static void pushPlaybackRing(AudioEngine& eng, int ch, const float* data, size_t
 
 // Returns pointer to first playback-capable session (legacy helper for
 // startAudio "default" path and old callers of PushPlaybackSamples).
+// Only returns sessions where pbRunning is true — a capture-only session
+// has no playback ring drainer and would silently discard pushed audio.
 static AudioEngine* playbackEngine() {
   // Check "default" first for backwards compat
   auto it = g_sessions.find("default");
-  if (it != g_sessions.end() && (it->second.pbRunning || it->second.capRunning))
+  if (it != g_sessions.end() && it->second.pbRunning)
     return &it->second;
   // Fall back to any session with playback running
   for (auto& kv : g_sessions) {
@@ -360,6 +357,10 @@ static AudioEngine* playbackEngine() {
 }
 
 // ── startSession / stopSession implementation ─────────────────────────────────
+
+// Forward declaration — safeStopSession is defined after startSessionImpl but
+// called from within it (to stop a pre-existing session before re-starting).
+static void safeStopSession(const std::string& sessionId);
 
 // Core implementation shared by StartSession and startAudioImpl("default", ...)
 // capUid/pbUid conflict check (capUid already claimed by another active session)
@@ -389,15 +390,12 @@ static Napi::Value startSessionImpl(Napi::Env env,
     }
   }
 
-  // Stop any existing instance of this session
+  // Stop any existing instance of this session (safe: AudioDeviceStop outside lock).
+  safeStopSession(sessionId + "_pb");
+  safeStopSession(sessionId);
+  // Insert a fresh engine for this session.
   {
     std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(sessionId);
-    if (it != g_sessions.end()) {
-      stopEngine(it->second);
-      g_sessions.erase(it);
-    }
-    // Insert a fresh engine; uid is set below after we configure the device
     g_sessions[sessionId]; // default-construct
   }
 
@@ -546,6 +544,49 @@ static Napi::Value startSessionImpl(Napi::Env env,
   return env.Undefined();
 }
 
+// Safely tears down a live session, avoiding the deadlock/use-after-free:
+//   1. Extract HAL stop info under lock, then release lock.
+//   2. Call AudioDeviceStop + AudioDeviceDestroyIOProcID outside lock.
+//      These block until any in-flight callback exits.
+//   3. Re-acquire lock to release TSFN and erase the map entry.
+static void safeStopSession(const std::string& sessionId) {
+  // Step 1: extract what we need without calling HAL.
+  AudioDeviceID    devId   = kAudioDeviceUnknown;
+  AudioDeviceIOProcID procId = nullptr;
+  Napi::ThreadSafeFunction tsfn;
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(sessionId);
+    if (it == g_sessions.end()) return;
+    devId  = it->second.deviceId;
+    procId = it->second.procId;
+    tsfn   = std::move(it->second.capTsfn);
+    // Null out procId so stopEngine (if called) won't double-stop.
+    it->second.procId = nullptr;
+  }
+
+  // Step 2: stop outside lock — blocks until any active callback completes.
+  if (procId != nullptr) {
+    AudioDeviceStop(devId, procId);
+    AudioDeviceDestroyIOProcID(devId, procId);
+  }
+
+  // Step 3: clean up map entry under lock.
+  {
+    std::lock_guard<std::mutex> lk(g_sessionsMutex);
+    auto it = g_sessions.find(sessionId);
+    if (it != g_sessions.end()) {
+      it->second.capRunning = false;
+      it->second.pbRunning  = false;
+      it->second.deviceId   = kAudioDeviceUnknown;
+      g_sessions.erase(it);
+    }
+  }
+
+  // Release TSFN outside lock (may call into JS).
+  if (tsfn) tsfn.Release();
+}
+
 // ── N-API: startSession / stopSession ────────────────────────────────────────
 
 // startSession(sessionId, capUid, capCh, pbUid, pbCh, captureCb)
@@ -564,19 +605,11 @@ static Napi::Value StartSession(const Napi::CallbackInfo& info) {
 static Napi::Value StopSession(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   std::string sessionId = info[0].As<Napi::String>();
-  std::lock_guard<std::mutex> lk(g_sessionsMutex);
-  // Also stop the associated _pb engine if it exists
-  std::string pbKey = sessionId + "_pb";
-  auto pbIt = g_sessions.find(pbKey);
-  if (pbIt != g_sessions.end()) {
-    stopEngine(pbIt->second);
-    g_sessions.erase(pbIt);
-  }
-  auto it = g_sessions.find(sessionId);
-  if (it != g_sessions.end()) {
-    stopEngine(it->second);
-    g_sessions.erase(it);
-  }
+  // Also stop the associated _pb engine if it exists.
+  // Use safeStopSession for each key to avoid deadlock (AudioDeviceStop
+  // must be called outside g_sessionsMutex).
+  safeStopSession(sessionId + "_pb");
+  safeStopSession(sessionId);
   return env.Undefined();
 }
 
@@ -588,26 +621,18 @@ static Napi::Value startAudioImpl(Napi::Env env,
                                   const std::string& pbUid,
                                   int pbCh,
                                   Napi::Function capCb) {
-  // Stop only the "default" session (and its _pb companion) before restarting it
-  {
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    std::string pbKey = "default_pb";
-    auto pbIt = g_sessions.find(pbKey);
-    if (pbIt != g_sessions.end()) { stopEngine(pbIt->second); g_sessions.erase(pbIt); }
-    auto it = g_sessions.find("default");
-    if (it != g_sessions.end()) { stopEngine(it->second); g_sessions.erase(it); }
-  }
+  // Stop only the "default" session (and its _pb companion) before restarting it.
+  // Use safeStopSession to avoid deadlock — AudioDeviceStop must be outside the lock.
+  safeStopSession("default_pb");
+  safeStopSession("default");
   return startSessionImpl(env, "default", capUid, capCh, pbUid, pbCh, capCb);
 }
 
 static Napi::Value StopAudio(const Napi::CallbackInfo& info) {
-  // stopAudio stops only the "default" session for backward compat
-  std::lock_guard<std::mutex> lk(g_sessionsMutex);
-  std::string pbKey = "default_pb";
-  auto pbIt = g_sessions.find(pbKey);
-  if (pbIt != g_sessions.end()) { stopEngine(pbIt->second); g_sessions.erase(pbIt); }
-  auto it = g_sessions.find("default");
-  if (it != g_sessions.end()) { stopEngine(it->second); g_sessions.erase(it); }
+  // stopAudio stops only the "default" session for backward compat.
+  // Use safeStopSession to avoid deadlock — AudioDeviceStop must be outside the lock.
+  safeStopSession("default_pb");
+  safeStopSession("default");
   return info.Env().Undefined();
 }
 
@@ -689,15 +714,15 @@ static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
   std::string sessionId = "default";
   if (info.Length() > 1 && info[1].IsString())
     sessionId = info[1].As<Napi::String>();
+  // Hold g_sessionsMutex across the lookup AND the clear operation to prevent
+  // a concurrent stopSession from erasing the entry mid-use (Issue 3).
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
   AudioEngine* eng = nullptr;
-  {
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(sessionId);
-    if (it != g_sessions.end()) eng = &it->second;
-  }
-  if (!eng) {
+  auto it = g_sessions.find(sessionId);
+  if (it != g_sessions.end()) {
+    eng = &it->second;
+  } else {
     // Legacy fallback
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
     eng = playbackEngine();
   }
   if (!eng) return env.Undefined();
@@ -711,49 +736,59 @@ static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
 static Napi::Value PushPlaybackSamples(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  AudioEngine* eng = nullptr;
   int ch;
   float gain;
   uint32_t dataArgIdx;
 
+  // Pre-parse args before acquiring the lock (Napi calls are JS-thread-safe here).
   if (info[0].IsString()) {
-    // New form: (sessionId, channel, data [, gain])
-    std::string sessionId = info[0].As<Napi::String>();
-    ch          = info[1].As<Napi::Number>().Int32Value();
-    gain        = info.Length() > 3 ? info[3].As<Napi::Number>().FloatValue() : 1.f;
-    dataArgIdx  = 2;
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    auto it = g_sessions.find(sessionId);
-    if (it != g_sessions.end()) eng = &it->second;
+    ch         = info[1].As<Napi::Number>().Int32Value();
+    gain       = info.Length() > 3 ? info[3].As<Napi::Number>().FloatValue() : 1.f;
+    dataArgIdx = 2;
   } else {
-    // Legacy form: (channel, data [, gain]) — use "default" or any running session
     ch         = info[0].As<Napi::Number>().Int32Value();
     gain       = info.Length() > 2 ? info[2].As<Napi::Number>().FloatValue() : 1.f;
     dataArgIdx = 1;
-    std::lock_guard<std::mutex> lk(g_sessionsMutex);
-    eng = playbackEngine();
   }
 
-  if (!eng) return env.Undefined();
+  // Pre-parse the audio data before acquiring the lock so we don't hold the
+  // map lock while iterating Napi arrays (which can be slow).
+  std::vector<float> tmp;
+  const float* dataPtr = nullptr;
+  size_t dataLen = 0;
 
   if (info[dataArgIdx].IsTypedArray()) {
     auto arr = info[dataArgIdx].As<Napi::Float32Array>();
-    size_t n = arr.ElementLength();
-    if (n > 0) pushPlaybackRing(*eng, ch, arr.Data(), n, gain);
+    dataPtr = arr.Data();
+    dataLen = arr.ElementLength();
   } else if (info[dataArgIdx].IsBuffer()) {
     auto buf = info[dataArgIdx].As<Napi::Buffer<uint8_t>>();
-    size_t nFloats = buf.Length() / sizeof(float);
-    if (nFloats > 0) {
-      const float* data = reinterpret_cast<const float*>(buf.Data());
-      pushPlaybackRing(*eng, ch, data, nFloats, gain);
-    }
+    dataPtr = reinterpret_cast<const float*>(buf.Data());
+    dataLen = buf.Length() / sizeof(float);
   } else if (info[dataArgIdx].IsArray()) {
     auto arr = info[dataArgIdx].As<Napi::Array>();
-    std::vector<float> tmp(arr.Length());
+    tmp.resize(arr.Length());
     for (uint32_t i = 0; i < arr.Length(); i++)
       tmp[i] = arr.Get(i).As<Napi::Number>().FloatValue();
-    pushPlaybackRing(*eng, ch, tmp.data(), tmp.size(), gain);
+    dataPtr = tmp.data();
+    dataLen = tmp.size();
   }
+
+  if (!dataPtr || dataLen == 0) return env.Undefined();
+
+  // Hold g_sessionsMutex across the lookup AND the ring push to prevent a
+  // concurrent stopSession from erasing the entry mid-use (Issue 3).
+  std::lock_guard<std::mutex> lk(g_sessionsMutex);
+  AudioEngine* eng = nullptr;
+  if (info[0].IsString()) {
+    std::string sessionId = info[0].As<Napi::String>();
+    auto it = g_sessions.find(sessionId);
+    if (it != g_sessions.end()) eng = &it->second;
+  } else {
+    eng = playbackEngine();
+  }
+
+  if (eng) pushPlaybackRing(*eng, ch, dataPtr, dataLen, gain);
   return env.Undefined();
 }
 
@@ -764,7 +799,7 @@ static Napi::Value PlayTestTone(const Napi::CallbackInfo& info) {
   int ch = info[0].As<Napi::Number>().Int32Value();
   int ms = info.Length() > 1 ? info[1].As<Napi::Number>().Int32Value() : 500;
   eng->testChannel = ch;
-  eng->testPhase = 0.0;
+  eng->testPhase.store(0.0, std::memory_order_relaxed);
   eng->testSamplesLeft = (int)(eng->deviceSampleRate * ms / 1000.0);
   return info.Env().Undefined();
 }
