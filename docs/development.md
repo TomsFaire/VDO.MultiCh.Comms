@@ -1,6 +1,6 @@
 # Development Guide
 
-**Version:** v0.1.1
+**Version:** v0.1.3
 
 ---
 
@@ -78,16 +78,16 @@ hdiutil detach "/Volumes/VDO.MultiCh.Comms <version>" -force
 3. `npm run build` → DMG
 4. Ad-hoc sign, SHA-256 checksums, publish via `softprops/action-gh-release`
 
-See [superpowers/specs/2026-06-02-github-actions-release-design.md](superpowers/specs/2026-06-02-github-actions-release-design.md) for the full design.
-
 To cut a release:
 
 ```bash
-# Update app/package.json and app/build-meta.json version
+# 1. Update version in app/package.json and app/build-meta.json
+# 2. Commit, tag, push
 git add app/package.json app/build-meta.json
 git commit -m "chore: bump version to x.y.z"
 git tag vx.y.z
 git push origin vx.y.z
+# CI builds and publishes the DMG automatically
 ```
 
 ---
@@ -101,8 +101,8 @@ app/
   build-meta.json      { "version", "build" }
   package.json         electron-builder; extraResources ships coreaudio.node
   renderer/
-    app.js             UI — comms bar, groups, line connect, settings
-    index.html         UI shell
+    app.js             UI — comms bar, groups, line connect, settings, meters
+    index.html         UI shell + styles
   native/
     coreaudio.mm       CoreAudio capture/playback N-API addon
     binding.gyp
@@ -116,41 +116,47 @@ docs/
   handoff.md           Maintainer handoff (deeper IPC/config detail)
   known-issues.md      Status and bugs
   self-hosting.md      VDO.ninja / TURN
+  screenshot-v0.1.3.png  UI screenshot
 ```
 
 ---
 
 ## Architecture notes
 
-### CoreAudio capture and playback
+### CoreAudio sessions
 
-The N-API addon (`coreaudio.node`) opens configured input/output devices. The IO proc callback de-interleaves capture buffers and invokes a JS callback per channel. Playback uses per-output-channel ring buffers fed by `pushPlaybackSamples()` from the renderer preload.
+The N-API addon (`coreaudio.node`) manages a `std::map<string, AudioEngine>` keyed by session ID:
+
+- **`"default"`** — shared session opened by `startAudio(capUid, nIn, pbUid, nOut, cb)` at startup. Handles all lines that use the global device. Capture is demultiplexed per channel; playback is per-channel ring buffers.
+- **`"pl-N"` / `"pl-N_pb"`** — per-PL sessions opened by `startSession(sessionId, capUid, capCh, pbUid, pbCh, cb)` when a line has dedicated devices. Separate capture callback and playback ring for full isolation.
+
+Key exports: `startSession`, `stopSession`, `pushPlaybackSamples(sessionId, ch, data, gain)`, `clearPlaybackChannel(ch, sessionId)`, `listDevices`, `playTestTone`.
 
 ### IPC audio bridge
 
-Each active line registers its input channel in `channelViews`. Main process sends `audio-frame` to the line's hidden `WebContentsView`. The per-line preload feeds an `AudioWorkletNode` ring buffer and resolves the `getUserMedia` override with a `MediaStreamDestination` stream.
+- **Capture:** `captureCallback(ch, samples)` looks up `channelViews[ch]` (shared) or `sessionViews[lineId]` (per-PL) and calls `webContents.send('audio-frame', ch, samples)` to the correct line view. Input gain (`gain_in`) is applied before send.
+- **Playback:** line shims call `ipcRenderer.send('playback-frame', outCh, samples, gain)`. Main process routes to `pushPlaybackSamples('pl-N', 0, ...)` for per-PL sessions or `pushPlaybackSamples('default', outCh, ...)` for shared lines. Output gain is read from the live `outputGainByLineId` cache.
 
-Inbound remote audio is tapped from VDO.ninja media elements, batched in an AudioWorklet, and sent back via `playback-frame` IPC to the matching hardware output channel.
+### Shim (per-line preload)
 
-### Single room, grouped lines
+`buildLineShim(inputChannel, outputChannel, gainOut, group, stripIce)` generates a preload script written to a temp file at connect time. It:
 
-- **Mobile Comms:** `/comms?room=<comms_room>&groups=<g1>,<g2>,…&groupmode=1`
-- **Desktop line push:** `room=<comms_room>&push=<comms_room>_<group>&group=<group>&groupmode=1`
-- **Director:** `director=<comms_room>&groups=<all>&groupmode=1`
+1. Overrides `getUserMedia` to inject an `AudioWorklet`-fed `MediaStreamDestination` stream (mic path)
+2. Patches `RTCPeerConnection` to strip ICE servers when `STRIP_ICE` is true
+3. Watches DOM for `<video>`/`<audio>` elements — immediately mutes them (`el.muted = true; el.volume = 0`) and taps their `srcObject` via a second AudioWorklet (remote tap path)
+4. Sends captured remote audio frames back via `playback-frame` IPC
 
-One hidden `WebContentsView` per line handles both publish and group-scoped listen.
+### LAN vs WAN mode
 
-### LAN WebRTC mode
+`webrtc_lan_mode: true` → `STRIP_ICE = true` in the shim (strips `iceServers` from all `RTCPeerConnection` configs) and adds `stunonly=1` to VDO.ninja URLs. Suppresses Chromium DNS resolution errors for TURN hosts on isolated LANs. Default is `false` (WAN/TURN enabled) for cross-building deployments.
 
-When `webrtc_lan_mode` is true (default), line preloads patch `RTCPeerConnection` to strip `iceServers`, and join URLs include `turn=off` + `stunonly`. This avoids Electron DNS failures against public STUN/TURN hostnames on LAN-only shows.
+### Level meters
 
-### Device change
-
-Saving new input/output devices restarts the unified CoreAudio session via `applyAudioFromConfig()`. Active lines keep their VDO.ninja views; capture routing updates via `channelViews`.
+`coreAudio.startAudio` fires ~30 times/sec. Main process tracks rolling peaks in `capturePeaks` and `playbackPeaks` maps (decayed by `LEVEL_DECAY = 0.85` each tick). Sent to renderer via `audio-levels` IPC; renderer maps 0–0.5 float to 0–100% bar width with color thresholds at 60% (yellow) and 95% (red).
 
 ---
 
 ## Further reading
 
 - [handoff.md](handoff.md) — config model, URL builders, native addon API
-- [known-issues.md](known-issues.md) — open limitations and resolved shim-era issues
+- [known-issues.md](known-issues.md) — open limitations and resolved issues
