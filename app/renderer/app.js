@@ -42,6 +42,18 @@ function populateDeviceDropdown(select, devices, uidKey, nameKey) {
   });
 }
 
+// Populate per-line device dropdowns
+function populateLineDeviceDropdown(select, devices, currentUid) {
+  select.innerHTML = '<option value="">Using global</option>';
+  devices.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.uid;
+    opt.textContent = `${d.name} (${d.channels}ch)`;
+    if (d.uid === currentUid) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
 function findInputDevice() {
   if (config.input_device_uid) {
     return shimDevices.inputs.find(d => d.uid === config.input_device_uid);
@@ -277,6 +289,18 @@ function renderLines() {
         <div class="meter"><div class="meter-bar meter-bar-out" id="meter-out-${line.id}"></div></div>
         <div class="meter-labels"><span>mic</span><span>remote</span></div>
       </div>
+      <div class="device-row">
+        <label>In device</label>
+        <select id="dev-in-${line.id}" data-line="${line.id}" data-dir="in">
+          <option value="">Using global</option>
+        </select>
+      </div>
+      <div class="device-row">
+        <label>Out device</label>
+        <select id="dev-out-${line.id}" data-line="${line.id}" data-dir="out">
+          <option value="">Using global</option>
+        </select>
+      </div>
       <div class="channel-row">
         <label>In</label>
         <select id="ch-in-${line.id}" data-line="${line.id}" data-dir="in" title="Hardware input 1–${outputChannelCount}">
@@ -304,10 +328,46 @@ function renderLines() {
     `;
 
     container.appendChild(panel);
+
+    // Populate device dropdowns for this line
+    populateLineDeviceDropdown(
+      document.getElementById(`dev-in-${line.id}`),
+      shimDevices.inputs,
+      line.input_device_uid || ''
+    );
+    populateLineDeviceDropdown(
+      document.getElementById(`dev-out-${line.id}`),
+      shimDevices.outputs,
+      line.output_device_uid || ''
+    );
+  });
+
+  // Device select listeners (input)
+  document.querySelectorAll('select[data-line][data-dir="in"][id^="dev-in-"]').forEach(el => {
+    el.addEventListener('change', e => {
+      const id = parseInt(e.target.dataset.line);
+      const line = config.lines.find(l => l.id === id);
+      if (line) {
+        line.input_device_uid = e.target.value || null;
+        window.api.saveConfig(config);
+      }
+    });
+  });
+
+  // Device select listeners (output)
+  document.querySelectorAll('select[data-line][data-dir="out"][id^="dev-out-"]').forEach(el => {
+    el.addEventListener('change', e => {
+      const id = parseInt(e.target.dataset.line);
+      const line = config.lines.find(l => l.id === id);
+      if (line) {
+        line.output_device_uid = e.target.value || null;
+        window.api.saveConfig(config);
+      }
+    });
   });
 
   // Channel select listeners
-  document.querySelectorAll('select[data-line]').forEach((el) => {
+  document.querySelectorAll('select[data-line][id^="ch-"]').forEach((el) => {
     el.addEventListener('change', (e) => {
       const id = parseInt(e.target.dataset.line);
       const dir = e.target.dataset.dir;
