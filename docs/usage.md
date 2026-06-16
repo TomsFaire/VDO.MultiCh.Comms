@@ -1,6 +1,6 @@
 # Usage Guide
 
-**Version:** v0.1.1
+**Version:** v0.1.3
 
 ---
 
@@ -8,26 +8,52 @@
 
 On first launch a setup wizard prompts for:
 
-- **Event name** — identifies this instance (e.g. `faire-2026`); becomes the shared VDO.ninja **comms room**
-- **Line names** — up to 4 names, one per party line (e.g. `Stage`, `FOH`, `Truck`, `Green Room`)
+- **Event name** — identifies this instance (e.g. `studio-2026`); becomes the shared VDO.ninja **comms room**
+- **Line names** — up to 4 names, one per party line (e.g. `Party Line`, `Audio`, `TECH`, `PGM`)
 
 Each line gets a **group** inside that room (derived from the line name). The Comms bar at the top shows one QR code and join link for the whole event — mobile users pick their line on the Comms page.
-
-Renaming a line in Settings updates the display label. The stored **group** (routing identity) does not change automatically; edit it in Settings if you need different routing.
 
 ---
 
 ## Audio device setup
 
-1. Open **Settings** (gear icon, top right)
-2. Select **Input device** — your audio interface, BlackHole, or built-in mic
-3. Select **Output device** — where remote participants' audio is played back (can be the same device for duplex routing)
-4. Assign **Input channel** and **Output channel** per line (0-based index):
-   - Line 1 on channel 0, Line 2 on channel 1, etc.
-   - BlackHole 16ch: channels 0–15; BlackHole 2ch: channels 0–1
-5. Click **Save** — CoreAudio restarts with the new devices; connected lines keep their VDO.ninja sessions
+### Global device (shared across lines)
 
-The app enumerates devices via CoreAudio and shows accurate channel counts. If a device shows fewer channels than expected, connect the interface before launching the app.
+1. Open **Settings** (gear icon, top right)
+2. Select **Input device** — your audio interface or built-in mic
+3. Select **Output device** — where remote participants' audio is played back
+4. Click **Save**
+
+### Per-line device (dedicated interface per PL)
+
+Each line panel has its own **In device** and **Out device** dropdowns. When a line has its own devices set:
+
+- A dedicated CoreAudio session is opened for that line on connect
+- The line's audio is fully isolated from other lines — useful for assigning one USB headset or belt-pack interface per operator
+- Set both dropdowns to the same interface for a duplex (single-device) session
+
+If a per-PL device is left unset (blank), the line falls back to the global device and channel index routing.
+
+### Channel assignment
+
+Each line panel also has **In** and **Out** channel selectors (1-based in the UI, 0-based in config):
+
+- Line 1 on channel 1, Line 2 on channel 2, etc.
+- A 4-channel interface can run 4 independent party lines simultaneously
+- BlackHole 16ch: channels 1–16; Focusrite Scarlett 4i4: channels 1–4
+
+---
+
+## Gain and level meters
+
+Each line panel shows:
+
+- **Gain in** — scales the mic capture before it's sent over WebRTC (0–10×, ~+20 dB max)
+- **Gain out** — scales incoming remote audio before it's written to the output channel (0–10×)
+- **Level meters** — two bars per line: mic (left, green) and remote (right, blue)
+  - Yellow at 60%, red at 95% — signals approaching clip
+
+Sliders update the display live and save on release (no audio restart).
 
 ---
 
@@ -52,10 +78,10 @@ Each desktop line panel also shows a group-scoped push URL for the operator view
 
 ## During a session
 
-- Connect lines from the desktop panels — each opens a hidden VDO.ninja view for that group
-- All lines can run simultaneously inside the same comms room
-- Remote audio for a line plays on that line's configured **output channel** on your audio interface
-- Participant muting is handled in the VDO.ninja director view; there is no per-participant mute in the app UI
+- Click **Connect** on each line panel to open a VDO.ninja session for that group
+- Lines can run simultaneously inside the same comms room
+- Remote audio for a line plays on that line's configured output channel / device
+- Level meters update in real time — mic bar shows what you're sending, remote bar shows what's coming in
 
 When connecting multiple lines at once, the app staggers joins slightly to avoid signaling contention.
 
@@ -88,7 +114,7 @@ Imported sessions use the same comms room and groups, so the same Comms QR works
 | VDO.ninja URL | Public `https://vdo.ninja` or your self-hosted HTTPS frontend |
 | **Test connection** | Verifies HTTPS reachability of a custom base URL |
 | Comms password | Optional room password appended to all generated URLs |
-| LAN WebRTC mode | Default on — best for same-LAN shows; disable for cross-NAT with TURN |
+| LAN WebRTC mode | Strip TURN/STUN from Electron views — suppresses DNS errors on same-LAN shows; disable (default) for WAN/cross-building use |
 
 See [self-hosting.md](self-hosting.md) for custom VDO.ninja and TURN setup.
 

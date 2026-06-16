@@ -1,76 +1,86 @@
 # Known Issues & Status
 
-**Last updated:** 2026-06-15 — v0.1.1
+**Last updated:** 2026-06-16 — v0.1.3
 
 See also: [usage.md](usage.md) (end users), [development.md](development.md) (build from source), [self-hosting.md](self-hosting.md) (TURN / custom VDO.ninja).
+
+---
+
+## Resolved (v0.1.3)
+
+### Per-PL audio device selection
+Each party line can now have its own dedicated input and output CoreAudio device. `connect-line` calls `startSession("pl-N", capUid, capCh, pbUid, pbCh, cb)` when per-PL devices are set and differ from the global device. Lines on the global device continue to use the shared session and channel-index routing.
+
+### Audio bleed — VDO.ninja elements playing through system speakers
+VDO.ninja `<video>`/`<audio>` elements in each line's hidden view were playing remote audio through the system default output (e.g. MacBook built-in speakers) independently of the CoreAudio routing. Fixed by immediately muting all media elements in the shim (`el.muted = true; el.volume = 0`) and re-muting on every `playing` event and every 3-second polling interval.
+
+### Audio bleed — shared PL playback routing to wrong session
+When a per-PL session (e.g. MacBook speakers) was active, `playbackEngine()` would fall back to that session for all shared PLs, routing all remote audio to the per-PL device. Fixed by switching shared PLs to the explicit `pushPlaybackSamples('default', ch, ...)` form.
+
+### WebRTC settings hardcoded — LAN/WAN not user-configurable
+`webrtc_turn_off`, `webrtc_stun_only`, and `webrtc_lan_mode` were hardcoded to `false` on every config load, making them impossible to change via config. Switched to null-guard defaults (`if (cfg.x == null) cfg.x = false`) so saved values are respected. Default remains WAN mode (TURN/STUN enabled).
+
+### Gain slider range too narrow
+Gain sliders were capped at 3× (≈+10 dB). Raised to 10× (≈+20 dB) to handle quiet sources without clipping. No soft limiting — high gain on loud signals will hard-clip at ±1.0 in the CoreAudio ring buffer.
+
+### Level meter red threshold too low
+Red color triggered at 85%. Moved to 95%; yellow remains at 60%.
 
 ---
 
 ## Resolved (v0.1.1)
 
 ### Rust shim removed — CoreAudio in-process
-**Done.** The separate Rust CPAL process and `ws://127.0.0.1:9696` bridge are gone. Capture and playback run in the Electron main process via `coreaudio.node` (CoreAudio N-API addon). Per-channel frames route over Electron IPC (`audio-frame` / `playback-frame`) to each line’s preload.
-
-This eliminates an entire class of shim-era bugs (port 9696 contention, broadcast consumer starvation, tokio timer jitter, separate-process lifecycle).
+The separate Rust CPAL process and `ws://127.0.0.1:9696` bridge are gone. Capture and playback run in the Electron main process via `coreaudio.node`. Per-channel frames route over Electron IPC to each line's preload.
 
 ### Inbound audio → hardware output channels
-**Done.** Remote participants are tapped from VDO.ninja media elements in the same hidden view that publishes the line. Samples are batched in an AudioWorklet and sent to `coreAudio.pushPlaybackSamples()` on the configured output channel. No longer limited to Electron’s default speakers.
+Remote participants are tapped from VDO.ninja media elements in the same hidden view that publishes the line. Samples are batched in an AudioWorklet and sent to `coreAudio.pushPlaybackSamples()` on the configured output channel.
 
 ### Single Comms room + grouped lines
-**Done.** All party lines share one `comms_room`. VDO.ninja `group` / `groups` / `groupmode=1` replaces separate room URLs per line. Mobile clients use one `/comms?room=…&groups=…` link; desktop lines push with `push=<room>_<group>` in the same room.
+All party lines share one `comms_room`. VDO.ninja `group` / `groups` / `groupmode=1` replaces separate room URLs per line.
 
 ### Combined push + listen per line
-**Done.** One hidden `WebContentsView` per line handles both publish and group-scoped listen (no second listen-only session).
-
-### LAN WebRTC mode (Electron DNS failures)
-**Done (default on).** When `webrtc_lan_mode` is true (default), line preloads patch `RTCPeerConnection` to strip `iceServers`, and join URLs include `turn=off` + `stunonly`. This avoids Chromium `errorcode: -105` DNS lookups to public STUN/TURN hosts that often fail inside Electron on LAN-only shows.
-
----
-
-## Resolved (shim era — historical)
-
-These applied to v0.0.1 builds using the Rust shim; kept for context if you’re comparing old DMGs or logs.
-
-- **Shim → VDO.ninja AudioWorklet bridge** — stable by build 28; superseded by IPC bridge in v0.1.1.
-- **Shared ring buffer / WS consumer contention** — renderer enumeration WS starved preload; fixed by closing after device list (no longer relevant — no WS).
-- **Timer-driven dispatch jitter** — CPAL-event-driven broadcast replaced tokio 10ms timer.
-- **Port 9696 crash loop** — `lsof` without `-s tcp:LISTEN` killed Chromium clients; fixed before shim removal.
-- **Mic change not taking effect** — shim restart + line reconnect; now unified `startUnifiedAudio()` on config save.
+One hidden `WebContentsView` per line handles both publish and group-scoped listen.
 
 ---
 
 ## Open
 
-### Cross-NAT / WAN use
-**LAN-first.** Default config enables LAN mode (`webrtc_lan_mode: true`, `turn=off`, ICE stripped in Electron views). Peer-to-peer on the same LAN works via host candidates.
+### Same-channel conflict (two PLs, same I/O)
+If two lines are configured with the same output channel (shared session), only one receives remote audio — whichever sends frames last wins. No UI warning is shown. Unique output channels per line are assumed.
 
-Cross-NAT or internet traversal requires a TURN server and a VDO.ninja frontend configured to use it. You must also disable or relax LAN mode in `config.json` (`webrtc_lan_mode: false`) so STUN/TURN can be used — see [self-hosting.md](self-hosting.md).
-
-### `session.setPreloads` deprecation warning
-Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads` still works in the current Electron version.
+### High-gain clipping
+No soft limiter in the audio path. Gain values above ~3–4× on loud sources will hard-clip in the ring buffer. A `tanh`-based soft limiter in `pushPlaybackRing` would help; not yet implemented.
 
 ### App is unsigned
-Right-click → Open required on first launch on any macOS machine that hasn’t run it before. Gatekeeper blocks a normal double-click until the user explicitly allows it.
+Right-click → Open required on first launch. Gatekeeper blocks a normal double-click until explicitly allowed.
 
 ### macOS only
-CoreAudio N-API addon is Darwin-only. No Windows/Linux build today.
+CoreAudio N-API addon is Darwin-only. No Windows/Linux build.
 
 ### Group routing on mobile
 Ungrouped talk on the Comms page is heard on **all** lines. Operators must tap the correct party-line button before speaking.
 
+### `session.setPreloads` deprecation warning
+Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads` still works in the current Electron version.
+
 ---
 
-## Working (v0.1.1)
+## Working (v0.1.3)
 
 - First-run setup wizard (event name + line names → `comms_room` + per-line `group`)
-- Session export / import (base64, v2 format with `comms_room` + groups)
+- Session export / import (base64, v2 format)
 - Single Comms QR / join link (`/comms?room=…&groups=…`)
 - Per-line desktop push URLs (group-scoped into shared room)
 - Director link (all groups, opens in system browser)
 - CoreAudio device enumeration (UID + channel counts)
-- Unified capture/playback (duplex on same device when input = output UID)
+- Global unified capture/playback (duplex when input = output UID)
+- Per-PL dedicated device sessions (`startSession` / `stopSession`)
 - Per-line IPC audio bridge (hardware → VDO.ninja, remote → hardware channel)
-- Device change restarts audio via `applyAudioFromConfig()`
-- Optional comms room password (`comms_password`)
-- Build footer (v0.1.1 build N), auto-incremented on each DMG build
+- VDO.ninja media element muting (no speaker bleed)
+- Live level meters (mic + remote, green/blue/yellow/red)
+- Per-line gain in/out (0–10×, save on slider release)
+- LAN/WAN WebRTC mode configurable via `webrtc_lan_mode`
+- Optional comms room password
+- Build footer (v0.1.3 build N), auto-incremented on each DMG build
 - Settings **Test connection** against custom `vdo_base_url`
