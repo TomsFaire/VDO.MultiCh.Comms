@@ -1,27 +1,35 @@
 # Development Guide
 
-## Prerequisites
-
-- macOS arm64 (Apple Silicon)
-- [Rust](https://rustup.rs) stable toolchain
-- Node.js 18+
+**Version:** v0.1.1
 
 ---
 
-## Build the shim
+## Prerequisites
+
+- macOS arm64 (Apple Silicon)
+- Node.js 18+ and npm
+- Xcode Command Line Tools (for `node-gyp` / CoreAudio N-API build)
+
+The Rust shim was removed in v0.1.1. You do **not** need Rust.
+
+---
+
+## Build the CoreAudio native addon
+
+Required before dev run or DMG build.
 
 ```bash
-cd shim
-cargo build --release
+cd app/native
+npm install
+npm run build
+# → app/native/build/Release/coreaudio.node
 ```
 
-Rebuild whenever `shim/src/audio.rs` or `shim/src/main.rs` changes.
+Rebuild after any change to `coreaudio.mm`.
 
 ---
 
 ## Run in dev mode
-
-The shim must be built before starting the app in dev mode.
 
 ```bash
 cd app
@@ -29,34 +37,57 @@ npm install
 npm start
 ```
 
-The app spawns the pre-built shim binary automatically on startup.
+Config is created on first run at `~/.vdo-multichan/config.json`.
 
 ---
 
 ## Build a distributable DMG
 
 ```bash
-cd shim && cargo build --release
-cd ../app && npm run build
-# Output: app/dist/VDO.MultiCh.Comms-0.1.0-arm64.dmg
+cd app/native && npm install && npm run build
+cd .. && npm run build
+# → app/dist/VDO.MultiCh.Comms-<version>-arm64.dmg
 ```
 
-The build number in `app/build-meta.json` auto-increments on each DMG build. The v0.1.0 release DMG is also available on the [GitHub Releases page](../../releases).
+`scripts/bump-build.js` auto-increments the build number in `app/build-meta.json` before each dist build.
+
+Pre-built releases are published on the [GitHub Releases page](https://github.com/TomsFaire/VDO.MultiCh.Comms/releases) when a `v*.*.*` tag is pushed.
 
 ---
 
 ## Viewing logs from the packaged app
 
-Run the app binary directly from Terminal to see stdout/stderr:
-
 ```bash
 /Applications/VDO.MultiCh.Comms.app/Contents/MacOS/VDO.MultiCh.Comms
 ```
 
-If a previously mounted DMG is blocking install, eject it first:
+Eject a mounted DMG before rebuilding:
 
 ```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
+hdiutil detach "/Volumes/VDO.MultiCh.Comms <version>" -force
+```
+
+---
+
+## CI / releases
+
+`.github/workflows/release.yml` runs on tag push `v*.*.*`:
+
+1. `npm ci` in `app/`
+2. Build `coreaudio.node` in `app/native/`
+3. `npm run build` → DMG
+4. Ad-hoc sign, SHA-256 checksums, publish via `softprops/action-gh-release`
+
+See [superpowers/specs/2026-06-02-github-actions-release-design.md](superpowers/specs/2026-06-02-github-actions-release-design.md) for the full design.
+
+To cut a release:
+
+```bash
+# Update app/package.json and app/build-meta.json version
+git add app/package.json app/build-meta.json
+git commit -m "chore: bump version to x.y.z"
+git tag vx.y.z
+git push origin vx.y.z
 ```
 
 ---
@@ -64,64 +95,62 @@ hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
 ## Repo layout
 
 ```
-app/              Electron app (Node.js main + HTML/JS renderer)
-  main.js         Main process — shim lifecycle, IPC, WebContentsView setup
-  preload.js      Renderer preload — exposes IPC to renderer
+app/
+  main.js              Main process — CoreAudio, IPC, WebContentsView, line preloads
+  preload.js           Renderer preload — IPC bridge
+  build-meta.json      { "version", "build" }
+  package.json         electron-builder; extraResources ships coreaudio.node
   renderer/
-    app.js        UI logic (connectShim closes after device list — critical)
-    index.html    UI shell + styles
-  assets/
-    icon.icns     App icon
+    app.js             UI — comms bar, groups, line connect, settings
+    index.html         UI shell
+  native/
+    coreaudio.mm       CoreAudio capture/playback N-API addon
+    binding.gyp
+    package.json       node-gyp build scripts
   scripts/
-    bump-build.js Auto-increments build-meta.json before each dist build
-  build-meta.json { "version": "0.1.0", "build": 28 }
-  package.json    electron-builder config, targets mac arm64 DMG
+    bump-build.js      Auto-increment build before dist
 
-shim/             Rust audio shim
-  src/main.rs     WebSocket server, broadcast dispatch
-  src/audio.rs    CPAL capture (broadcast) + playback (ring buffer)
+docs/
+  usage.md             End-user guide
+  development.md       This file
+  handoff.md           Maintainer handoff (deeper IPC/config detail)
+  known-issues.md      Status and bugs
+  self-hosting.md      VDO.ninja / TURN
 ```
 
 ---
 
 ## Architecture notes
 
-### Shim broadcast dispatch
+### CoreAudio capture and playback
 
-The CPAL input callback accumulates interleaved samples into pre-allocated per-channel `Vec<f32>` buffers. When all channels reach `FRAME_SIZE` (480 samples = 10ms @ 48kHz), a multi-channel binary packet is packed and sent via `tokio::sync::broadcast::Sender`. `send()` is non-async and safe to call from the real-time CPAL thread.
+The N-API addon (`coreaudio.node`) opens configured input/output devices. The IO proc callback de-interleaves capture buffers and invokes a JS callback per channel. Playback uses per-output-channel ring buffers fed by `pushPlaybackSamples()` from the renderer preload.
 
-Packet format: `[ch: u32 LE][n_samples: u32 LE][samples: f32[] LE]` × N channels (N = actual device channel count, max `CHANNEL_COUNT=4`).
+### IPC audio bridge
 
-Each WebSocket client subscribes independently with `frame_tx.subscribe()` — no shared consumer contention. If a client lags, the broadcast drops old frames with a `Lagged` warning rather than applying backpressure.
+Each active line registers its input channel in `channelViews`. Main process sends `audio-frame` to the line's hidden `WebContentsView`. The per-line preload feeds an `AudioWorkletNode` ring buffer and resolves the `getUserMedia` override with a `MediaStreamDestination` stream.
 
-### AudioWorklet bridge
+Inbound remote audio is tapped from VDO.ninja media elements, batched in an AudioWorklet, and sent back via `playback-frame` IPC to the matching hardware output channel.
 
-Each VDO.ninja `WebContentsView` gets a per-line preload script loaded via `session.setPreloads`. The preload overrides `navigator.mediaDevices.getUserMedia` synchronously before any VDO.ninja JS runs.
+### Single room, grouped lines
 
-On async init it opens `ws://127.0.0.1:9696`, feeds matching-channel frames into an `AudioWorkletNode` ring buffer (2s / 96000 samples, 500ms startup hold), and resolves `getUserMedia` with the `MediaStreamDestinationNode` stream. Falls back to native mic if the shim is unavailable within 10s.
+- **Mobile Comms:** `/comms?room=<comms_room>&groups=<g1>,<g2>,…&groupmode=1`
+- **Desktop line push:** `room=<comms_room>&push=<comms_room>_<group>&group=<group>&groupmode=1`
+- **Director:** `director=<comms_room>&groups=<all>&groupmode=1`
 
-`audioCtx.resume()` is called at WS open and again before resolving the stream as a defence against browser autoplay policy.
+One hidden `WebContentsView` per line handles both publish and group-scoped listen.
 
-### Renderer WS connection
+### LAN WebRTC mode
 
-`app.js connectShim` connects to port 9696 solely to retrieve the device list for Settings dropdowns. **It closes immediately (code 1000) after receiving the `devices` message.** If it stayed connected, it would compete with the preload's audio receiver for broadcast frames and starve audio.
+When `webrtc_lan_mode` is true (default), line preloads patch `RTCPeerConnection` to strip `iceServers`, and join URLs include `turn=off` + `stunonly`. This avoids Electron DNS failures against public STUN/TURN hostnames on LAN-only shows.
 
-### Mic change reconnect
+### Device change
 
-`lineConfigs` (map of id → `{url, channelId}`) tracks all active lines. After `killPortAndStartShim` spawns a new shim process, a 1s timer fires and reconnects every line — destroying the old `WebContentsView` and creating a new one with a fresh preload pointing to the new shim instance.
+Saving new input/output devices restarts the unified CoreAudio session via `applyAudioFromConfig()`. Active lines keep their VDO.ninja views; capture routing updates via `channelViews`.
 
-### Shim binary path
+---
 
-```js
-app.isPackaged
-  ? path.join(process.resourcesPath, 'shim')   // packaged DMG
-  : path.join(__dirname, '..', 'shim', 'target', 'release', 'shim')  // dev
-```
+## Further reading
 
-### VDO.ninja join URL
-
-```
-https://vdo.ninja/?room=ROOMKEY&webcam=1&vd=0&videodevice=0&autostart=1&label=NAME&monomic=1&proaudio=1&noisetgate=0&compressor=0&autoGain=0
-```
-
-`&webcam=1` is required for `&autostart=1` to bypass the device selection screen.
+- [handoff.md](handoff.md) — config model, URL builders, native addon API
+- [known-issues.md](known-issues.md) — open limitations and resolved shim-era issues

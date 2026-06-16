@@ -1,64 +1,76 @@
 # Known Issues & Status
 
-**Last updated:** 2026-06-02 — v0.1.0 build 28
+**Last updated:** 2026-06-15 — v0.1.1
+
+See also: [usage.md](usage.md) (end users), [development.md](development.md) (build from source), [self-hosting.md](self-hosting.md) (TURN / custom VDO.ninja).
 
 ---
 
-## Install notes
+## Resolved (v0.1.1)
 
-### App is ad-hoc signed, not notarized
+### Rust shim removed — CoreAudio in-process
+**Done.** The separate Rust CPAL process and `ws://127.0.0.1:9696` bridge are gone. Capture and playback run in the Electron main process via `coreaudio.node` (CoreAudio N-API addon). Per-channel frames route over Electron IPC (`audio-frame` / `playback-frame`) to each line’s preload.
 
-Right-click → Open is required on first launch on any Mac. Gatekeeper blocks a normal double-click until the user explicitly allows the app. This is expected for v0.1.0. Full Apple Developer ID notarization is planned post-alpha.
+This eliminates an entire class of shim-era bugs (port 9696 contention, broadcast consumer starvation, tokio timer jitter, separate-process lifecycle).
+
+### Inbound audio → hardware output channels
+**Done.** Remote participants are tapped from VDO.ninja media elements in the same hidden view that publishes the line. Samples are batched in an AudioWorklet and sent to `coreAudio.pushPlaybackSamples()` on the configured output channel. No longer limited to Electron’s default speakers.
+
+### Single Comms room + grouped lines
+**Done.** All party lines share one `comms_room`. VDO.ninja `group` / `groups` / `groupmode=1` replaces separate room URLs per line. Mobile clients use one `/comms?room=…&groups=…` link; desktop lines push with `push=<room>_<group>` in the same room.
+
+### Combined push + listen per line
+**Done.** One hidden `WebContentsView` per line handles both publish and group-scoped listen (no second listen-only session).
+
+### LAN WebRTC mode (Electron DNS failures)
+**Done (default on).** When `webrtc_lan_mode` is true (default), line preloads patch `RTCPeerConnection` to strip `iceServers`, and join URLs include `turn=off` + `stunonly`. This avoids Chromium `errorcode: -105` DNS lookups to public STUN/TURN hosts that often fail inside Electron on LAN-only shows.
 
 ---
 
-## Resolved
+## Resolved (shim era — historical)
 
-### Shim → VDO.ninja AudioWorklet bridge
-**Fixed (build 28).** The bridge is working and stable.
+These applied to v0.0.1 builds using the Rust shim; kept for context if you’re comparing old DMGs or logs.
 
-Root causes found and fixed:
-- **Shared ring buffer contention** — the renderer's device-enumeration WebSocket and the per-line preload's audio WebSocket both connected to port 9696 and competed for the same `HeapConsumer`. Fix: renderer closes its WS immediately (code 1000) after receiving the device list.
-- **Timer-driven dispatch jitter** — tokio 10ms interval missed ticks under load, causing burst/drain cycles. Fix: replaced with CPAL-event-driven broadcast dispatch.
-- **JS ring buffer too small** — 80ms ring exhausted by scheduler jitter. Increased to 2s (96000 samples) with 500ms startup hold.
-- **DevTools flood** — underrun counter fired per-sample. Fixed to per-`process()` call.
-- **`Fixed(480)` CPAL buffer size** — broke on MacBook Pro Microphone. Reverted to `Default`; the accumulator + broadcast design makes buffer size irrelevant.
-
-### Network service crash loop
-**Fixed (build 22).** `lsof -ti tcp:9696` without `-s tcp:LISTEN` matched Chromium's outbound connections to port 9696. Fixed with `lsof -ti tcp:9696 -s tcp:LISTEN`.
-
-### Mic change not taking effect
-**Fixed (build 28).** Active lines now automatically reconnect when the shim restarts after a device change.
+- **Shim → VDO.ninja AudioWorklet bridge** — stable by build 28; superseded by IPC bridge in v0.1.1.
+- **Shared ring buffer / WS consumer contention** — renderer enumeration WS starved preload; fixed by closing after device list (no longer relevant — no WS).
+- **Timer-driven dispatch jitter** — CPAL-event-driven broadcast replaced tokio 10ms timer.
+- **Port 9696 crash loop** — `lsof` without `-s tcp:LISTEN` killed Chromium clients; fixed before shim removal.
+- **Mic change not taking effect** — shim restart + line reconnect; now unified `startUnifiedAudio()` on config save.
 
 ---
 
 ## Open
 
-### Inbound audio not routed to hardware output channels
-The Rust shim has playback ring buffers (`playback_producers`) but they are not yet fed from VDO.ninja's WebRTC output. Remote audio plays through Electron's default audio output device rather than a specific hardware channel.
+### Cross-NAT / WAN use
+**LAN-first.** Default config enables LAN mode (`webrtc_lan_mode: true`, `turn=off`, ICE stripped in Electron views). Peer-to-peer on the same LAN works via host candidates.
 
-### STUN/TURN DNS failures in logs
-`errorcode: -105` from `services/network/p2p/socket_manager.cc` — cosmetic. WebRTC falls back to host ICE candidates (direct LAN IP). Works on LAN without TURN. Will not traverse NAT without a TURN server.
-
-**Workaround for cross-NAT use:** self-host Coturn. See [docs/self-hosting.md](self-hosting.md).
+Cross-NAT or internet traversal requires a TURN server and a VDO.ninja frontend configured to use it. You must also disable or relax LAN mode in `config.json` (`webrtc_lan_mode: false`) so STUN/TURN can be used — see [self-hosting.md](self-hosting.md).
 
 ### `session.setPreloads` deprecation warning
 Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads` still works in the current Electron version.
 
+### App is unsigned
+Right-click → Open required on first launch on any macOS machine that hasn’t run it before. Gatekeeper blocks a normal double-click until the user explicitly allows it.
+
+### macOS only
+CoreAudio N-API addon is Darwin-only. No Windows/Linux build today.
+
+### Group routing on mobile
+Ungrouped talk on the Comms page is heard on **all** lines. Operators must tap the correct party-line button before speaking.
+
 ---
 
-## Working
+## Working (v0.1.1)
 
-- First-run setup wizard (event name + line names → permanent room keys)
-- Session export / import (base64 code, Settings panel)
-- Per-line QR codes and join links (audio-only, `&webcam=1&vd=0&autostart=1`)
-- Director link per panel (`&director=ROOMKEY`, opens in system browser)
-- Device enumeration (CPAL channel count probe)
-- Settings dropdowns populated from shim device list
-- Shim auto-starts on app launch, restarts on device change
-- Active lines reconnect after shim restart
-- Port 9696 cleanup — only the shim's LISTEN socket is killed
-- AudioWorklet bridge: shim audio flows into VDO.ninja without hardware mic
-- 2s ring buffer + 500ms startup hold — stable under normal scheduler jitter
-- 2-machine party line validated (v0.1.0 PoC)
-- Build number in footer, auto-incremented on each DMG build
+- First-run setup wizard (event name + line names → `comms_room` + per-line `group`)
+- Session export / import (base64, v2 format with `comms_room` + groups)
+- Single Comms QR / join link (`/comms?room=…&groups=…`)
+- Per-line desktop push URLs (group-scoped into shared room)
+- Director link (all groups, opens in system browser)
+- CoreAudio device enumeration (UID + channel counts)
+- Unified capture/playback (duplex on same device when input = output UID)
+- Per-line IPC audio bridge (hardware → VDO.ninja, remote → hardware channel)
+- Device change restarts audio via `applyAudioFromConfig()`
+- Optional comms room password (`comms_password`)
+- Build footer (v0.1.1 build N), auto-incremented on each DMG build
+- Settings **Test connection** against custom `vdo_base_url`
