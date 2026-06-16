@@ -1,144 +1,182 @@
-# Agent Handoff — VDO.MultiCh.Comms
+# Development Handoff — VDO.MultiCh.Comms
 
-**Date:** 2026-06-02
-**Current build:** 0.1.0 build 28
-**Branch:** `main`
+**Date:** 2026-06-15  
+**Current version:** 0.1.1 (see `app/build-meta.json` for build number)  
+**Branch:** `feature/comms-single-room`
 
 ---
 
 ## What this project is
 
-A macOS Electron app for multi-channel IP intercom. It connects multiple "party lines" to VDO.ninja rooms so broadcast crew (e.g. at a Faire event) can communicate across audio channels independently.
+A macOS Electron app for multi-channel IP intercom. It connects up to four **party lines** to a **single VDO.ninja Comms room**, with each line as a **group** inside that room. Broadcast crew (e.g. at a live event) route hardware audio channels independently while mobile users join one Comms link.
 
 **Architecture:**
+
 ```
-Hardware mic / BlackHole
-  → Rust shim (CPAL, per-channel PCM capture)
-  → tokio::sync::broadcast (hardware-clocked, no timer)
-  → WebSocket ws://127.0.0.1:9696
-  → Electron WebContentsView preload (AudioWorklet bridge)
-  → VDO.ninja getUserMedia override
-  → WebRTC → remote participants (phone, web browser)
+Hardware mic / BlackHole (CoreAudio)
+  → coreaudio.node N-API addon (main process)
+  → captureCallback → webContents.send('audio-frame', ch, samples)
+  → Per-line preload (AudioWorklet getUserMedia override)
+  → VDO.ninja push (group-scoped, room=comms_room)
+  → WebRTC → remote participants
+
+Remote audio (inbound)
+  → Same WebContentsView (group-scoped listen)
+  → DOM remote-tap + AudioWorklet
+  → ipcRenderer.send('playback-frame', outCh, samples, gain)
+  → coreAudio.pushPlaybackSamples() → hardware output channel
 ```
+
+The **Rust shim** (`shim/`, CPAL, WebSocket :9696) was **deleted** in v0.1.1. Do not resurrect it — all audio I/O is in `app/native/coreaudio.mm`.
 
 ---
 
 ## Repo layout
 
 ```
-app/              Electron app (Node.js main + HTML/JS renderer)
-  main.js         Main process — shim lifecycle, IPC, WebContentsView setup
-  preload.js      Renderer preload — exposes IPC to renderer
+app/
+  main.js              Main process — CoreAudio, IPC, WebContentsView, line preloads
+  preload.js           Renderer preload — IPC bridge
+  build-meta.json      { "version", "build" } — bumped by scripts/bump-build.js
+  package.json         electron-builder; extraResources ships coreaudio.node
   renderer/
-    app.js        UI logic (connectShim closes after device list — critical)
-    index.html    UI shell + styles
-  assets/
-    icon.icns     App icon
+    app.js             UI — comms bar, groups, line connect, settings
+    index.html         UI shell
+  native/
+    coreaudio.mm       CoreAudio capture/playback N-API addon
+    binding.gyp
+    package.json       node-gyp build scripts
   scripts/
-    bump-build.js Auto-increments build-meta.json before each dist build
-    make-icns.sh  PNG → ICNS conversion
-  build-meta.json { "version": "0.1.0", "build": 28 }
-  package.json    electron-builder config, targets mac arm64 DMG
+    bump-build.js      Auto-increment build before dist
 
-shim/             Rust audio shim
-  src/main.rs     WebSocket server, broadcast dispatch
-  src/audio.rs    CPAL capture (broadcast) + playback (ring buffer)
+docs/
+  usage.md             End-user guide
+  development.md       Build from source, architecture
+  handoff.md           This file
+  known-issues.md      Status and open bugs
+  self-hosting.md      VDO.ninja / TURN / signaling
 ```
 
 ---
 
 ## How to build
 
+### Native addon (required before run or dist)
+
 ```bash
-# Rebuild shim whenever audio.rs or main.rs changes
-cd shim && cargo build --release
-
-# Build DMG (auto-bumps build number)
-cd app && npm run build
-# Output: app/dist/VDO.MultiCh.Comms-0.1.0-arm64.dmg
-
-# Run dev (no DMG, shim must be pre-built)
-cd app && npx electron .
+cd app/native
+npm install
+npm run build
+# → app/native/build/Release/coreaudio.node
 ```
 
-The v0.1.0 DMG is published on the [GitHub Releases page](../../releases). For end-user install instructions see [docs/usage.md](usage.md); for full source build details see [docs/development.md](development.md).
+Rebuild after any change to `coreaudio.mm`.
 
-**Run from terminal to see logs:**
+### Dev run
+
+```bash
+cd app
+npm install
+npm start
+```
+
+### DMG (auto-bumps build number)
+
+```bash
+cd app/native && npm run build
+cd .. && npm run build
+# → app/dist/VDO.MultiCh.Comms-<version>-arm64.dmg
+```
+
+### Logs from packaged app
+
 ```bash
 /path/to/VDO.MultiCh.Comms.app/Contents/MacOS/VDO.MultiCh.Comms
 ```
 
-If the previous DMG is still mounted, eject it first:
+Eject a mounted DMG before rebuilding:
+
 ```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
+hdiutil detach "/Volumes/VDO.MultiCh.Comms <version>" -force
 ```
+
+### CI
+
+`.github/workflows/release.yml` — single job: build native addon, `npm run build`, ad-hoc sign DMG, publish on `v*.*.*` tags. No Rust shim step.
 
 ---
 
-## Current status (build 28)
+## Config model
 
-### Working
-- First-run setup wizard, session export/import, QR codes, director links
-- VDO.ninja WebContentsView auto-joins rooms silently (`&webcam=1&vd=0&autostart=1`)
-- **Outbound audio via shim bridge** ✅ — stable as of build 28
-- **Mic change reconnect** ✅ — changing input device in Settings reconnects all active lines automatically
-- Inbound audio (remote → Electron speakers) ✅
-- Shim auto-starts on launch, restarts on Settings save
-- Build number in footer
+Path: `~/.vdo-multichan/config.json`
 
-### Known open issues
-1. **Inbound audio not routed to hardware output** — playback ring buffers exist in the Rust shim (`playback_producers`) but aren't fed from VDO.ninja WebRTC output. Remote audio plays through Electron's default audio output device, not a specific hardware channel.
+| Field | Purpose |
+|-------|---------|
+| `comms_room` | Single VDO.ninja room for all lines + mobile Comms |
+| `comms_password` | Optional room password (appended to all URLs) |
+| `lines[].group` | Party-line identity inside the room (from line name) |
+| `lines[].input_channel` / `output_channel` | Hardware channel index (0-based) |
+| `input_device_uid` / `output_device_uid` | CoreAudio device UID |
+| `webrtc_lan_mode` | Default `true` — strip ICE in preloads, `turn=off` on URLs |
+| `webrtc_turn_off` / `webrtc_stun_only` | URL params for WebRTC behavior |
 
-2. **STUN/TURN DNS failures** — cosmetic noise in logs. Works on LAN via host ICE candidates; cross-NAT requires a TURN server.
+**Migration:** legacy per-line `room_key` configs are upgraded in `migrateConfig()` (`main.js`) to `comms_room` + `group`.
 
-3. **`session.setPreloads` deprecation** — low priority, still works.
-
-4. **App unsigned** — right-click → Open on first launch.
+**Session export:** v2 base64 JSON `{ v: 2, comms_room, comms_password, lines: [{ id, name, group }] }`. v1 (room_key list) still imports.
 
 ---
 
-## Key implementation details
+## VDO.ninja URL builders (`renderer/app.js`)
 
-### Shim broadcast dispatch (audio.rs)
-The CPAL input callback accumulates interleaved samples into pre-allocated per-channel `Vec<f32>` buffers. When all channels reach `FRAME_SIZE` (480 samples = 10ms @ 48kHz), a multi-channel binary packet is packed and sent via `tokio::sync::broadcast::Sender`. `send()` is non-async and safe to call from the real-time CPAL thread.
+- `commsJoinUrl()` — mobile: `/comms?room=&groups=&groupmode=1`
+- `lineUrl(line)` — desktop push: `room`, `push=<room>_<group>`, `group`, `groupmode=1`, audio-only flags
+- `directorUrl()` — `director=<comms_room>`, all groups
 
-Packet format: `[ch: u32 LE][n_samples: u32 LE][samples: f32[] LE]` × N channels (N = actual device channel count, max CHANNEL_COUNT=4).
-
-### Per-client broadcast receivers (main.rs)
-Each `handle_client` subscribes to the broadcast with `frame_tx.subscribe()`. A `cap_task` tokio task loops on `rx.recv().await` and forwards frames as binary WebSocket messages. If a client lags (slow WS write), the broadcast drops old frames with a `Lagged` warning — no global backpressure.
-
-### AudioWorklet bridge (main.js buildShimScript)
-Injected as a preload into each line's `WebContentsView` via `session.setPreloads` with `contextIsolation: false`. Overrides `getUserMedia` synchronously before VDO.ninja JS runs.
-
-- Ring buffer: 96000 samples (2s) Float32Array, startup hold 24000 samples (500ms)
-- Parses multi-channel packets from WS, pushes matching channel into ring
-- Falls back to native mic if shim WS unavailable within 10s
-- `audioCtx.resume()` called at WS open and again before resolving stream (autoplay policy defence)
-
-### Renderer WS connection (app.js connectShim)
-The renderer connects to 9696 solely to get the device list for Settings dropdowns. **It closes immediately (code 1000) after receiving the `devices` message.** If it stayed connected, it would starve the preload's audio receiver by competing for frames on the same broadcast channel.
-
-### Mic change reconnect (main.js)
-`lineConfigs` map (id → `{url, channelId}`) tracks all active lines. After `killPortAndStartShim` spawns a new shim process, a 1s timer fires and reconnects every line in `lineConfigs` — destroying the old `WebContentsView` and creating a new one with a fresh preload script pointing to the new shim.
-
-### Shim binary path
-```js
-app.isPackaged
-  ? path.join(process.resourcesPath, 'shim')   // packaged app
-  : path.join(__dirname, '..', 'shim', 'target', 'release', 'shim')  // dev
-```
-
-### VDO.ninja join URL
-```
-https://vdo.ninja/?room=ROOMKEY&webcam=1&vd=0&videodevice=0&autostart=1&label=NAME&monomic=1&proaudio=1&noisetgate=0&compressor=0&autoGain=0
-```
-`&webcam=1` is required for `&autostart=1` to bypass the device selection screen.
+`applyWebRtcParams()` adds `turn=off` and `stunonly` when LAN mode is on.
 
 ---
 
-## Environment / test machine
+## Main process audio flow (`main.js`)
+
+1. `coreAudio.startAudio(capUid, nIn, pbUid, nOut, captureCallbackLogged)` — unified session
+2. `channelViews` maps input channel → `webContents.id` for active lines
+3. `captureCallback` sends `audio-frame` to the matching line view
+4. `playback-frame` IPC → `coreAudio.pushPlaybackSamples(outCh, floats, gain)`
+5. `disconnect-line` → `coreAudio.clearPlaybackChannel(outputChannel)`
+
+### Line views
+
+- `connect-line` writes a temp preload (`buildLineShim`) — name is historical; it’s an IPC AudioWorklet bridge, not the Rust shim
+- One `WebContentsView` per line, muted speaker output (`setAudioMuted(true)`)
+- Preload patches `RTCPeerConnection` when `webrtc_lan_mode` strips ICE servers
+- Staggered connect delay in renderer when multiple lines connect (`otherConnected * 1500ms`)
+
+---
+
+## Native addon (`coreaudio.mm`)
+
+- `listDevices()` — UID, name, in/out channel counts
+- `startAudio` / `stopAudio` — IO proc capture + per-channel playback rings
+- `pushPlaybackSamples(channel, float32, gain)`
+- `clearPlaybackChannel(channel)` — on remote track teardown
+- `playTestTone(channel, ms)` — settings/debug
+
+Max 16 channels; 48 kHz expected.
+
+---
+
+## Current status
+
+See [known-issues.md](known-issues.md) for the full list. Summary:
+
+- **Working:** full duplex hardware routing, grouped Comms room, session import/export, LAN WebRTC mode
+- **Open:** cross-NAT (needs TURN + `webrtc_lan_mode: false`), unsigned DMG, macOS-only, `setPreloads` deprecation
+
+---
+
+## Test environment notes
+
 - Apple Silicon MacBook Pro (arm64)
-- Audio devices: BlackHole 16ch, BlackHole 2ch, MacBook Pro Microphone, NDI Audio, Microsoft Teams Audio, ZoomAudioDevice
-- MacBook Pro Speakers: NOT enumerated by CPAL — shim falls back to `default_output_device()` when empty or unmatched
+- Typical devices: BlackHole 2ch/16ch, built-in mic, NDI Audio, ZoomAudioDevice
+- macOS TCC microphone: `systemPreferences.askForMediaAccess('microphone')` on launch
 - App unsigned — right-click → Open on first launch
-- macOS TCC microphone: granted
