@@ -1,8 +1,18 @@
 # Known Issues & Status
 
-**Last updated:** 2026-06-16 — v0.1.3
+**Last updated:** 2026-06-16 — v0.1.4
 
 See also: [usage.md](usage.md) (end users), [development.md](development.md) (build from source), [self-hosting.md](self-hosting.md) (TURN / custom VDO.ninja).
+
+---
+
+## Resolved (v0.1.4)
+
+### Room name editable from Settings
+`comms_room` was only settable at the first-run wizard. Added a 'Room name' text input to the Settings panel. Changing it regenerates all join URLs and the QR code and clears any active lock.
+
+### Room lock
+Added a 'Lock room' button to the comms bar. Locking applies a random 16-char password to all VDO.ninja URLs via `&password=` (signaling encryption). New joiners with the old URL cannot communicate into the room; existing p2p connections are unaffected. Lock state persisted in config (`room_locked`, `lock_password`).
 
 ---
 
@@ -66,7 +76,7 @@ Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads
 
 ---
 
-## Working (v0.1.3)
+## Working (v0.1.4)
 
 - First-run setup wizard (event name + line names → `comms_room` + per-line `group`)
 - Session export / import (base64, v2 format)
@@ -81,6 +91,8 @@ Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads
 - Live level meters (mic + remote, green/blue/yellow/red)
 - Per-line gain in/out (0–10×, save on slider release)
 - LAN/WAN WebRTC mode configurable via `webrtc_lan_mode`
+- Room name editable from Settings (regenerates QR and URLs)
+- Room lock (comms bar button — applies random password to exclude new joiners)
 - Optional comms room password
 - Build footer (v0.1.3 build N), auto-incremented on each DMG build
 - Settings **Test connection** against custom `vdo_base_url`

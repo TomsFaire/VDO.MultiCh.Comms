@@ -1,7 +1,7 @@
 # Development Handoff — VDO.MultiCh.Comms
 
 **Date:** 2026-06-16
-**Current version:** 0.1.3 (see `app/build-meta.json` for build number)
+**Current version:** 0.1.4 (see `app/build-meta.json` for build number)
 **Branch:** `feature/audio-bifurcation`
 
 ---

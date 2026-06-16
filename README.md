@@ -1,39 +1,75 @@
 # VDO.MultiCh.Comms
 
-> **Alpha — v0.1.3.** Not production-ready. Expect rough edges.
+> **Alpha — v0.1.4.** Not production-ready. Expect rough edges.
 
-Multi-channel IP intercom built on [VDO.ninja](https://vdo.ninja) (WebRTC) and macOS CoreAudio hardware I/O. Designed for live production environments where you need independent party lines routed to a multi-channel audio interface — without a separate audio daemon or WebSocket bridge.
+Multi-channel IP intercom for live production. Run up to four independent party lines through a single [VDO.ninja](https://vdo.ninja) Comms room, each routed to a dedicated channel on a hardware audio interface — no separate daemon, no account, no app install for remote participants.
 
-Primary use case: bridging two buildings with hardware intercom systems over WAN (ISDN/IP replacement). Works equally well on LAN.
+**Primary use case:** bridging two buildings with hardware intercom systems over WAN (ISDN/IP replacement). Works equally well on LAN.
 
-4 independent party lines share **one VDO.ninja Comms room**; each line is a **group** inside that room. Remote participants join from any mobile browser via a QR code — no app install required.
-
----
-
-![VDO.MultiCh.Comms v0.1.3 — four party lines, per-PL device routing, gain and level meters](docs/screenshot-v0.1.3.png)
+![VDO.MultiCh.Comms v0.1.4 — four party lines, per-PL device routing, gain and level meters](docs/screenshot-v0.1.4.png)
 
 ---
 
 ## Install
 
-1. Download `VDO.MultiCh.Comms-0.1.3-arm64.dmg` from the [Releases page](https://github.com/TomsFaire/VDO.MultiCh.Comms/releases)
+1. Download `VDO.MultiCh.Comms-0.1.4-arm64.dmg` from the [Releases page](https://github.com/TomsFaire/VDO.MultiCh.Comms/releases)
 2. Mount the DMG and drag the app to Applications
 3. **Right-click → Open** on first launch — the app is ad-hoc signed but not notarized; Gatekeeper blocks a normal double-click until you explicitly allow it
 
 No Rust or Node.js required for end users.
 
-See [docs/usage.md](docs/usage.md) for a full walkthrough (setup wizard, Comms QR, audio routing, session export).
+---
+
+## How to use
+
+### First launch
+
+The setup wizard creates your config: give the event a name, name your party lines (Party Line, Audio, Tech, PGM, etc.), and pick your audio interface. Config is saved to `~/.vdo-multichan/config.json`.
+
+### Connecting a party line
+
+Each party line card on the main screen has:
+
+- **In device / Out device** — the CoreAudio input and output interface for that line
+- **In / Out channel** — which channel on that interface to use
+- **Gain in / Gain out** — adjustable per line (up to 10×, ~+20 dB)
+- **Level meters** — mic (left) and remote (right); yellow at 60%, red at 95%
+- **Test** — plays a short tone to verify the output route
+- **Connect** — joins the VDO.ninja room for that line
+
+Press **Connect** on each line you want active. The status bar at the top shows the current global audio device.
+
+### Remote participants (mobile / browser)
+
+At the top of the window, the **Comms** QR code and link give remote participants access to all party lines from any mobile browser — no app install required.
+
+1. Scan the QR code or share the Comms link
+2. Allow microphone access when prompted
+3. Tap the party line button to talk on that line (ungrouped audio is heard on all lines)
+
+The **Director** link opens a view covering all groups in the room.
+
+### Settings
+
+Click **Settings** (top-right) to change the room name, toggle room lock (prevents new participants from joining), or update global audio device settings.
+
+For a full walkthrough see [docs/usage.md](docs/usage.md).
 
 ---
 
-## What's new in v0.1.3
+## What's new in v0.1.4
 
-- **Per-PL audio device selection** — each party line can use its own input and output interface; assign a dedicated headset or belt-pack per line without sharing a multi-channel aggregate device
-- **Audio bleed fixes** — VDO.ninja `<video>`/`<audio>` elements are now silenced in each line's shim so remote audio can't leak through the system default output (e.g. MacBook speakers); shared-PL playback routing fixed to always target the correct CoreAudio session
-- **Gain range** — per-line gain sliders raised from 3× to 10× (~+20 dB headroom) for quiet sources
-- **Level meters** — mic (green) and remote (blue) level bars per line; yellow at 60%, red at 95%
-- **WebRTC config unlocked** — `webrtc_lan_mode`, `webrtc_turn_off`, and `webrtc_stun_only` were hardcoded to `false` on every launch; they now respect your config file. Default is WAN mode (TURN/STUN enabled) to support cross-building deployments
-- **Audio stability** — save-config no longer restarts CoreAudio mid-session; gain sliders save on release, not every drag frame
+- **Room name editable from Settings** — change the VDO.ninja room name without editing config manually
+- **Room lock** — toggle in the comms bar to exclude new joiners from an active session
+
+### Also in v0.1.3
+
+- **Per-PL audio device selection** — each party line can use its own input and output interface
+- **Audio bleed fixes** — VDO.ninja media elements muted in shim; remote audio can't leak through system speakers
+- **Gain range** — sliders raised to 10× (~+20 dB); red meter threshold at 95%
+- **Level meters** — mic (green) and remote (blue) level bars per line
+- **WebRTC config unlocked** — LAN/WAN mode now user-configurable; WAN default (TURN/STUN enabled)
+- **Audio stability** — save-config no longer restarts CoreAudio mid-session; gain sliders save on release
 
 ### Also in v0.1.1 (if upgrading from v0.1.0)
 
@@ -44,7 +80,11 @@ See [docs/usage.md](docs/usage.md) for a full walkthrough (setup wizard, Comms Q
 
 ---
 
-## How it works
+---
+
+## For developers
+
+### How it works
 
 ```
 Hardware mic / BlackHole (CoreAudio)
@@ -69,7 +109,7 @@ Remote audio (inbound)
 
 ---
 
-## Status
+### Status
 
 | Feature | Status |
 |---|---|
@@ -87,6 +127,8 @@ Remote audio (inbound)
 | Audio bleed isolation (shim element muting) | ✅ Done (v0.1.3) |
 | LAN / WAN WebRTC mode (configurable) | ✅ Done (v0.1.3) |
 | STUN/TURN (cross-NAT, WAN default) | ✅ Done (v0.1.3) |
+| Room name editable from Settings | ✅ Done (v0.1.4) |
+| Room lock (exclude new joiners) | ✅ Done (v0.1.4) |
 | Device enumeration from CoreAudio (channel counts) | ✅ Done |
 | Build number auto-bump + DMG packaging | ✅ Done |
 | macOS TCC microphone permission | ✅ Done |
@@ -97,7 +139,7 @@ Remote audio (inbound)
 
 ---
 
-## Prerequisites
+### Prerequisites
 
 - macOS (Apple Silicon — arm64 DMG)
 - Node.js 18+ and npm — to build the Electron app and native addon
@@ -106,11 +148,11 @@ Remote audio (inbound)
 
 ---
 
-## Getting started (developers)
+### Getting started
 
 Build from source or see [docs/development.md](docs/development.md) for CI and release tagging.
 
-### 1. Build the CoreAudio native addon
+#### 1. Build the CoreAudio native addon
 
 ```bash
 cd app/native
@@ -119,7 +161,7 @@ npm run build
 # Output: app/native/build/Release/coreaudio.node
 ```
 
-### 2. Install and launch the Electron app (dev)
+#### 2. Install and launch the Electron app (dev)
 
 ```bash
 cd app
@@ -129,7 +171,7 @@ npm start
 
 Config lives at `~/.vdo-multichan/config.json` and is created on first run.
 
-### 3. Build a distributable DMG
+#### 3. Build a distributable DMG
 
 ```bash
 cd app/native && npm install && npm run build
@@ -141,7 +183,7 @@ The app is unsigned — right-click → Open on first launch on any machine.
 
 ---
 
-## Configuration
+### Configuration
 
 `~/.vdo-multichan/config.json` — written by the app UI, editable manually.
 
@@ -170,34 +212,21 @@ The app is unsigned — right-click → Open on first launch on any machine.
 
 ---
 
-## Joining a party line
+### Architecture notes
 
-**Mobile / remote:** scan the **Comms** QR code (one link for the whole event). On the Comms page, tap the button for the party line you want before talking — ungrouped audio is heard on all lines.
-
-**Per-line panel:** each line shows its own director/push URL for the desktop operator view (group-scoped push into the shared room).
-
-1. Scan the QR code or open the link on any device
-2. Allow microphone access when prompted
-3. Select your party line (Comms UI) or connect from the desktop panel
-4. You're in — no install, no account
-
----
-
-## Architecture notes
-
-### CoreAudio capture and playback
+#### CoreAudio capture and playback
 
 The N-API addon opens the configured input/output devices. The IO proc callback de-interleaves capture buffers and invokes a JS callback per channel. Playback uses per-output-channel ring buffers fed by `pushPlaybackSamples()` from the renderer preload's remote-tap path.
 
 Per-PL device sessions are managed by `startSession(sessionId, capUid, capCh, pbUid, pbCh, cb)` / `stopSession(sessionId)`. Each session owns its own `AudioEngine` with independent ring buffers and HAL callback.
 
-### IPC audio bridge
+#### IPC audio bridge
 
 Each active line registers its input channel in `channelViews` (shared session) or `sessionViews` (per-PL session). When a capture frame arrives, main process sends `audio-frame` over `webContents.send()` to the correct line's hidden view. The injected preload feeds an `AudioWorkletNode` ring buffer and resolves the `getUserMedia` override with a `MediaStreamDestination` stream.
 
 Inbound remote audio is tapped from VDO.ninja media elements (which are immediately muted to prevent speaker bleed), batched in an AudioWorklet, and sent back via `playback-frame` IPC to the matching CoreAudio session and output channel.
 
-### Single room, grouped lines
+#### Single room, grouped lines
 
 - **Operator / mobile Comms:** `/comms?room=<comms_room>&groups=<g1>,<g2>,…&groupmode=1`
 - **Per-line desktop push:** `room=<comms_room>&push=<comms_room>_<group>&group=<group>&groupmode=1`
@@ -206,7 +235,7 @@ One hidden `WebContentsView` per line handles both publish and group-scoped list
 
 ---
 
-## Documentation
+### Documentation
 
 | Doc | Audience |
 |-----|----------|
