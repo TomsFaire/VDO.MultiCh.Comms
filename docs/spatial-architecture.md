@@ -13,14 +13,15 @@ This needs to stay a mode, not a replacement — "normal" `VDO.MultiCh.Comms` us
 - **Input/talk routing — correction from earlier framing.** This isn't actually a global mode split the way output is. Whether a channel's audio comes from a dedicated hardware input (today's existing per-line model, untouched) or from the shared operator mic gated by talk-press depends on the channel and the use case, and both can coexist in the same running app: a sound op might wire their program mix straight into a "PGM" channel as a continuous dedicated feed for everyone to monitor, while using the shared mic for ordinary back-and-forth on other channels. **Required change:** add a per-channel `inputSource` property (`dedicated` | `sharedMic`) rather than a global toggle — `dedicated` channels reuse today's existing per-line input config exactly as-is, no talk button at all since they're always live; `sharedMic` channels use the new `transmittingChannels` gating. Mobile/touchscreen users only ever have `sharedMic` channels, since a phone has exactly one mic.
 - **`config.json` schema.** Gains new optional fields (an `outputMode` flag; per-line `type`, `positionMode`, `azimuth`, `volume`, `listening`). These need sensible defaults so a config saved by today's normal app still loads and behaves identically — no forced migration, no breaking change to the existing schema.
 - **Settings UI.** Gains a mode toggle. The existing per-line In/Out device and channel fields stay exactly as they are today and remain the active configuration surface specifically when Classic mode is selected; Spatial-mode-specific fields (azimuth, volume, listening) only appear when that mode is active.
-- **Native CoreAudio addon — likely untouched for v1.** Spatial mode's binaural output goes through standard Web Audio (`AudioContext.destination`), bypassing the custom native addon entirely rather than modifying it; Classic mode continues using it exactly as today. Worth confirming this holds once implementation starts, but it's the current expectation and keeps the blast radius small.
+- **Setup flow.** Today's GUI wizard stays exactly as it is for Classic mode. Spatial mode — particularly headless deployments — gets a separate CLI installer (see Architecture §5a) rather than extending the GUI wizard to cover a case it wasn't designed for.
+- **Native CoreAudio addon — not used at all by core v1.** Binaural output goes through standard Web Audio (`AudioContext.destination`), and `sharedMic` talk is plain `getUserMedia` — neither touches the custom native addon. It's only invoked for `dedicated`-type input channels and the future HDMI backend, both already working on Mac today; Classic mode continues using it exactly as before on Mac, and a Linux ALSA/PipeWire equivalent is only needed once `dedicated` channels or HDMI are actually wanted on Linux specifically, not for v1.
 - **Process note:** keep Classic-mode code paths as close to upstream as practical (minimize intertwining with new Spatial-mode logic) so future fixes/improvements to "normal" `VDO.MultiCh.Comms` stay easy to pull in, whether this lives as a real git fork or a clearly separated branch.
 
 ## Use Cases
 - **Personal/mobile binaural** — operator wearing headphones, no installed infrastructure. The fastest path to prove out, and the v1 render target.
 - **Fixed control room / mixing booth** — the same spatial mix embedded as discrete multichannel audio into HDMI, riding the room's existing video router/matrix instead of needing its own cable run, then de-embedded downstream (often via MADI) into whatever the room's actual audio domain is — a console, a Dante network, etc. Also the natural seam for splitting channels out to other hardware later.
 - **Studio talk control** — a Stream Deck driven by Bitfocus Companion, one button per channel. Press-and-hold a channel's button to talk on it, the same muscle memory as a real beltpack key panel; hold several at once to talk on multiple lines simultaneously.
-- **Mixing-room touchscreen control** — a tablet or phone kept within arm's reach, controlling the *same* session that's actually doing audio I/O on a separate machine (the Pi/Mac mini). Day 1 is Companion's own browser-based panel, already covering this for free; a dedicated custom control web UI is a Day 2 follow-on.
+- **Mixing-room touchscreen control** — a tablet or phone kept within arm's reach, controlling the *same* session that's actually doing audio I/O on a separate machine. Either Companion's own panel for a few quick buttons, or the full web UI for everything else — both are zero-additional-build options once the Control API and web UI exist.
 - **Mobile beltpack replacement (other participants)** — a separate self-contained mobile web client for *other* people — crew, talent, anyone who'd otherwise wear a hardware beltpack — joining directly from their own phone, not necessarily on the same network as anyone else. Distinct audience and architecture from the touchscreen control surface above; see the dedicated section below.
 
 ## Known Limitations
@@ -31,21 +32,23 @@ This needs to stay a mode, not a replacement — "normal" `VDO.MultiCh.Comms` us
 - Source: VDO.ninja party lines only, via the existing `VDO.MultiCh.Comms` pipeline. Analog hardware, SIP, and Dante are later phases — see Roadmap.
 - Listen: a single binaural stereo mix via Web Audio `PannerNode`s, one per active line, sharing one spatial position model that's designed to support additional render backends (HDMI/discrete multichannel) without rearchitecting later.
 - Talk: push-to-talk to one or more selected lines, controllable from a Stream Deck (via Companion) or a tablet/mobile web GUI, both talking to one local Control API.
-- Initial hardware: Raspberry Pi or Mac mini for the binaural render; standard headphone/line-out, no AVR or HDMI multichannel requirement yet.
+- Initial hardware: a Linux host (Pi 5 or, likely better value/performance right now, an N100/N150 mini PC — see Platform Notes) or Mac mini for the binaural render; standard headphone/line-out, no AVR or HDMI multichannel requirement yet.
 
 ## Non-Goals (v1)
 - Analog hardware capture, SIP, Dante/AES67 sourcing (deferred — see Roadmap).
 - Actually shipping the discrete multichannel HDMI render backend (deferred — but the Render Layer must be built pluggable from day one so this doesn't require a rewrite when it's added).
 - A custom/measured HRTF dataset — Chromium's built-in HRTF panner is the v1 bar.
 - Elevation — azimuth only for v1; a Day 2 follow-on (see Roadmap).
-- Any custom mobile/touchscreen web UI — v1's touchscreen control need is met by Companion's existing panel; both a dedicated control UI and the Mobile Beltpack rendering client are Day 2/roadmap items.
+- A separate Mobile Beltpack rendering client — that one's still a Day 2/roadmap item, distinct from the operator's own web UI.
 - Breaking Classic mode — existing per-line dedicated input/output routing must keep working unchanged; see Compatibility with VDO.MultiCh.Comms.
 
 ## Tech Stack
 - Electron (the existing `VDO.MultiCh.Comms` app) — extend rather than replace.
+- **The UI is a web app, not an Electron-native window.** Radar positioning, settings, presets, Direct channel management — everything an operator interacts with — is served by the Control API as a single web app, the same pattern already used for Companion and the touchscreen surface. Electron's own window, if shown at all, just renders that same page; there's no separate native UI to build. This is what lets the actual audio host run headless.
 - Web Audio API's `PannerNode` (`panningModel: 'HRTF'`) for binaural rendering — real 3D placement via Chromium's built-in HRTF convolution, no custom DSP needed for v1.
-- A lightweight local Control API (HTTP/WebSocket server inside the Electron app) for talk-back, consumed by both a Companion module and the tablet/mobile web GUI — one talk engine, multiple control surfaces.
-- Native audio I/O: existing CoreAudio N-API addon continues handling capture and the operator's mic as today. A discrete multichannel output backend (ALSA/PipeWire on Pi, CoreAudio multichannel on Mac) is real future native work, not needed for v1's stereo-only output.
+- A lightweight local Control API (HTTP/WebSocket server inside the Electron app) for talk-back and now the entire UI, consumed by the web UI, a Companion module, and the Mobile Beltpack's roster/provisioning calls — one engine, multiple consumers.
+- Native audio I/O: pure v1 (VDO sources, binaural output, `sharedMic` talk) needs **no native addon at all** — VDO capture is plain WebRTC/AudioWorklet, the operator's mic is plain `getUserMedia`, and output is the browser's default stereo device. That makes v1 trivially portable to any Electron-capable host — NUC, Pi, Mac mini — with zero porting work. The existing CoreAudio addon only becomes relevant for two specific things: `dedicated`-type input channels (reusing today's per-line hardware routing) and the future discrete multichannel HDMI backend. Both already work on Mac (today's addon targets Apple Silicon); a Linux equivalent (ALSA/PipeWire) is only needed once one of those two features is actually wanted on Linux, not for v1 itself.
+- **Headless deployment:** the audio engine (WebRTC capture, the `PannerNode` render, mic/talk logic) runs in a hidden renderer context with no visible window, the same pattern the existing per-line `WebContentsView`s already use — nothing new conceptually, just extended to the whole engine. On Linux specifically, headless Chromium typically still wants a virtual display (Xvfb) or offscreen-rendering flags even with no monitor attached; worth confirming the exact flags needed once this is actually built, not assuming it's automatic.
 
 ## Architecture
 
@@ -72,18 +75,26 @@ This needs to stay a mode, not a replacement — "normal" `VDO.MultiCh.Comms` us
 - Local HTTP/WebSocket server inside the app exposing, per channel (party line or Direct): talk PTT down/up, listen enable/disable, set volume, set/adjust azimuth (and elevation later) — plus live status for whether you're transmitting, whether you're listening, and whether the channel is currently active (someone else talking on it).
 - Also exposes preset operations: list saved presets, save the current layout as a named preset, recall a named preset.
 - That last one needs a small new piece: a lightweight level/VAD tap per channel (reusing the level-metering approach already in `VDO.MultiCh.Comms` today) crossing a threshold to produce a simple "is this channel active right now" boolean — the actual signal a Companion light reflects.
-- Consumed by a custom Bitfocus Companion module and the tablet/mobile web GUI — one API, multiple control surfaces.
+- Consumed by a custom Bitfocus Companion module and the web UI — one API, multiple control surfaces.
+- **One server, one port.** The Control API and the web UI are the same HTTP/WebSocket server — it serves the static web UI assets and exposes the API the UI calls. There's exactly one port to configure, not two.
+
+### 5a. CLI Installer (new, Spatial-mode/headless deployments)
+- A separate setup path from today's existing GUI wizard, which stays untouched for Classic mode. For Spatial mode — especially headless boxes with no monitor — setup runs via an interactive CLI installer instead.
+- Assumes the box already has network connectivity (Ethernet/DHCP, or WiFi pre-configured at the OS level) before the installer runs; the installer's job is app setup, not network bootstrapping.
+- Interactive prompts: Web UI port (sensible default, e.g. 8080, with basic in-use validation), and operator display name — consolidating the "set your name at first launch" step from Direct Channels into this flow rather than a separate GUI step, for Spatial mode specifically.
+- Sets up a systemd service so the app auto-starts on boot and stays running — required for an unattended headless box.
+- On completion, enumerates the box's network interface(s) and echoes the full access URL(s), e.g. `Web UI available at http://192.168.1.42:8080` (more than one line if multi-homed).
 
 ### 6. Control Surfaces (Companion + Touchscreen)
 One action/feedback spec, expressed through Companion — including the touchscreen need for Day 1. Companion already ships its own browser-based virtual panel ("web buttons") mirroring whatever the module defines, live feedback colors included, reachable from any tablet or phone browser pointed at the Companion host. That covers "control buttons near my hands in a mixing room" with zero additional engineering once the module exists — no separate custom touchscreen page needed for Day 1.
 - **Actions**, per channel (party line or Direct): Talk (PTT down/up, using the existing short/long-press latch logic), Listen on/off, Set Volume, Pan as an incremental nudge (step left/right by a fixed amount, with continuous adjustment via a rotary encoder as a nicer option on Stream Deck+), and Recall Preset (a dropdown of saved preset names, applying that preset's full layout in one step).
 - **Feedbacks**, per channel: lit when the channel is currently active (someone talking on it), a distinct state for when *you* are transmitting on it, a distinct state for whether you're currently listening to it, and optionally which preset (if any) matches the currently active layout.
 - **Companion module:** custom from the start, not generic HTTP actions — this surface is more than a couple of generic calls can express cleanly.
-- **Day 1 touchscreen:** Companion's own web-buttons panel, as above — this resolves the earlier open question about whether the touchscreen surface needs a read-only spatial view; for Day 1 it doesn't, since it's just mirroring the same button grid Companion already provides.
-- **Day 2 (see Roadmap):** a dedicated, purpose-built control web UI beyond Companion's generic panel — the natural place to revisit a read-only spatial layout view, larger touch targets, or anything else Companion's panel can't express.
+- **Day 1 touchscreen:** Companion's own web-buttons panel covers the "just a few buttons near my hands" case with zero additional engineering. For full control — including positioning — the same web UI from the UI Layer below works on any tablet or phone browser too, since it's just a web page; this resolves the earlier open question about whether the touchscreen surface needs a read-only spatial view — it gets the real one, for free, by virtue of being the same app.
 
 ### 7. UI Layer
-- Radar (or sphere, once elevation is added) view, listener at center, each party line draggable by position; dragging updates that line's `PannerNode` live, no apply step.
+- A web app served by the Control API — not an Electron-native window. Radar (or sphere, once elevation is added) view, listener at center, each party line draggable by position; dragging updates that line's `PannerNode` live, no apply step. Settings, presets, and Direct channel management live here too.
+- Works identically whether opened in Electron's own window (if a monitor's attached locally) or from any browser elsewhere on the network — same page either way. This is what lets the audio host run fully headless.
 - Also needs to surface live talk state — which lines are currently receiving mic audio — visually, not just position.
 - Party lines and Direct channels need clearly distinct icon treatment, not just "draggable vs. not": e.g. PLs as a round, freely-draggable marker; Direct channels as a smaller pinned/person-style marker fixed to its slot, so a stationary PL can't be mistaken for a Direct channel at a glance. Worth treating as a starting point to refine once it's actually on screen, not a final spec.
 
@@ -93,17 +104,19 @@ One action/feedback spec, expressed through Companion — including the touchscr
 - Recallable two ways: from the radar UI directly, and from Companion via a dedicated action (see Companion Module).
 
 ## Platform Notes
-- **Mac mini & Raspberry Pi:** both trivially support standard stereo audio out for the v1 binaural render — no platform-specific output work needed yet.
-- **Pi target:** Pi 4 or Pi 5, running Raspberry Pi OS — not locked to one specific model. This matters once the discrete multichannel HDMI backend gets built: Pi 4 and Pi 5 use different HDMI/audio hardware paths (Pi 5's RP1 I/O chip vs. Pi 4's VC4-based path), so the HDMI multichannel de-risking test needs to run on both rather than assuming one result generalizes to the other.
-- **Debian-based SBC, generally:** the eventual native Linux work (ALSA/PipeWire output backend, packaging) should follow standard Debian/ALSA conventions rather than Pi-specific tooling where possible, so it isn't locked to Raspberry Pi specifically. That said, the lowest-level HDMI/audio quirks (`config.txt`, board-specific drivers) are inherently hardware-specific — porting to a different Debian SBC later would still need its own from-scratch verification, not just a recompile.
+- **Mac mini & Linux host:** both trivially support standard stereo audio out for the v1 binaural render — no platform-specific output work needed yet. They diverge on features beyond v1, not speed: Mac mini already has the existing native CoreAudio addon, so `dedicated` channels and the future HDMI backend work there with zero new native code; Linux needs that addon's ALSA/PipeWire equivalent built before either of those two features is usable there, whenever that becomes a priority.
+- **Linux target — reconsider Pi vs. an x86 mini PC.** Pi 4 is genuinely too weak for this workload (1.5GHz Cortex-A72, real risk of dropouts decoding multiple simultaneous WebRTC streams plus per-line HRTF convolution at the 10-12 participant target) — not recommended. Pi 5 is the realistic floor within the Pi family, but current pricing has eroded its advantage: 2026's DRAM shortage has pushed a fully kitted 8GB Pi 5 (board, power supply, cooling, storage) to roughly $135-195, putting it at or above N100/N150-class Celeron mini PCs (Beelink, GMKtec, Minisforum, etc.) with meaningfully more CPU headroom, NVMe storage standard, and more RAM. Two reasons to lean toward the mini PC specifically for this app: Electron/Node.js workloads have traditionally favored x86 performance-per-dollar, and HDMI multichannel audio — already this plan's single biggest hardware risk — is far more standardized on Intel's HDA driver path than on the Pi's VC4/RP1-specific HDMI quirks. The one real reason to stay in the Pi family is GPIO/physical hardware extensibility, relevant to the longer-term hardware-product ambition but not urgent now.
+- **Chosen dev/PoC host: a 6th-gen i3 NUC (8GB RAM, 256GB SSD).** A decade-old dual-core/4-thread x86 chip is comfortably sufficient for v1's actual workload — audio-only Opus decode is cheap, and HRTF convolution for a handful of sources is modest DSP work well within reach. Combined with v1 needing no native addon at all (see Tech Stack), this should just run, no porting work required. A future N100/N150 box remains worth considering for a dedicated/permanent unit, but isn't necessary to get started.
+- **Debian-based host, generally:** the eventual native Linux work (ALSA/PipeWire output backend, packaging) should follow standard Debian/ALSA conventions rather than Pi-specific tooling where possible, so it works on either an SBC or an x86 mini PC without rearchitecting. That said, the lowest-level HDMI/audio quirks (`config.txt` on Pi vs. standard ALSA HDA config on x86) are inherently hardware-specific — switching host types later still needs its own from-scratch verification of the HDMI path, not just a recompile.
 - **Mobile, later:** keeping the Render Layer's logic platform-agnostic now (not leaning on anything Electron-specific in the `PannerNode`/`AudioContext` code) keeps the door open for the Mobile Beltpack UX, which renders its own binaural mix independently of the desktop app.
 
 ## Phased Build Plan
 1. **Phase 0 — Binaural proof of concept.** Two or three static `PannerNode`s at different azimuths, confirm by ear (real headphones, both target platforms) that left/right/front/back are actually distinguishable.
 2. **Phase 1 — Wire it to live VDO lines.** Add the Output Mode setting first (Classic vs. Spatial), then replace per-line dedicated output routing with the `PannerNode` render layer *only* when Spatial mode is active — Classic mode's existing routing stays untouched. Static azimuths to start.
-3. **Phase 2 — Radar UI.** Add the draggable position UI, wire live azimuth changes into each line's `PannerNode`.
+3. **Phase 2 — Web UI.** Build the radar/positioning view as a web app served by the Control API (not an Electron-native window), draggable position UI wired to live azimuth changes on each line's `PannerNode`. Works the same whether opened locally or remotely — settings, presets, and Direct channel management land here too as they come online in later phases.
 4. **Phase 3 — Talk-back core.** The per-channel `inputSource` model (`dedicated` reusing today's existing input config, `sharedMic` for the new gated model), the `transmittingChannels` primitive, and the Control API — testable via raw HTTP calls before any control surface exists.
 5. **Phase 4 — Control surfaces.** The custom Companion module (Talk/Listen/Volume/Pan/Recall-Preset actions, activity/transmitting/listening feedbacks) against the Control API — Companion's own web-buttons panel covers the touchscreen need for free, no separate build required here.
+6. **Phase 5 — CLI installer.** Port selection, operator name prompt, systemd service setup, network-interface enumeration to echo the access URL(s). Depends on the Control API/web UI existing (Phases 2-3), so it's naturally last.
 6. **Phase 5 — Presets and polish**, including live talk-state indicators in the UI and Companion Feedbacks.
 7. **Later — Roadmap items** (below): discrete multichannel HDMI/MADI backend, analog hardware input, SIP, Dante/AES67, full mobile rendering app, other hardware platforms.
 
@@ -113,7 +126,7 @@ One action/feedback spec, expressed through Companion — including the touchscr
 **One sync point before splitting up:** agree the shared channel data model (id, label, type, positionMode, azimuth, volume, listening, inputSource) first — every track below builds on it, so getting it stable before parallel work starts avoids rework.
 
 **Parallel tracks**, each independent enough to run on its own agent/branch with a defined merge point:
-- **Track A — Core Listen Pipeline** (sequential within itself): Output Mode setting → binaural proof of concept → Render Layer → Radar UI.
+- **Track A — Core Listen Pipeline** (sequential within itself): Output Mode setting → binaural proof of concept → Render Layer → Web UI.
 - **Track B — Core Talk Pipeline** (independent of A until final integration, since talk and listen are mostly orthogonal subsystems): the `inputSource`/`transmittingChannels` model → Control API → Companion module.
 - **Track C — Presets:** light dependency on the shared data model only, otherwise standalone.
 - **Track D — Mobile Beltpack:** fully independent, separate codebase entirely, can start day one alongside everything else.
@@ -124,7 +137,7 @@ One action/feedback spec, expressed through Companion — including the touchscr
 - Output Mode setting (config schema + settings toggle): mid-tier — mechanical, but touches existing config loading that must stay backward-compatible, so care matters more than raw difficulty.
 - Binaural proof of concept: cheapest tier — small, disposable test, easy to verify by ear regardless of code quality.
 - Render Layer (wiring `PannerNode` into the existing real-time audio/IPC pipeline): most capable tier — real-time audio thread safety is the most failure-prone area flagged repeatedly in this plan; bugs here are quiet and hard to debug.
-- Radar UI: cheapest tier — visual/frontend work, low blast radius, easy to iterate.
+- Web UI: cheapest tier — standard web frontend work (not Electron-specific APIs), low blast radius, easy to iterate.
 - Talk-Back layer (`inputSource` branching, short/long-press classification): mid-tier — compatibility-sensitive (must not disturb existing dedicated-input behavior) plus real timing logic.
 - Control API: cheapest tier — once the primitives it wraps exist, this is mostly mechanical REST/WebSocket plumbing.
 - Companion module: cheapest-to-mid tier — glue code against a documented Companion SDK and our own API contract.
@@ -139,6 +152,8 @@ One action/feedback spec, expressed through Companion — including the touchscr
 ## Open Questions
 - Where should the Mobile Beltpack static page actually be hosted — alongside a self-hosted VDO.ninja instance, or separately?
 - Should Mobile Beltpack users also get the roster/Direct-line-request flow, or is requesting a Direct line desktop-only for now?
+- ~~First-time headless setup~~ — resolved: CLI installer, see Architecture §5a.
+- Break-glass access if the Control API/web UI is unreachable (crashed process, network down): proposing a small CLI companion command (e.g. `status`, runnable over SSH) that re-displays the access URL and basic health, reusing the same network-interface-enumeration logic as the installer. Flagging this as a proposal, not yet confirmed — let me know if this covers it or you want something else.
 
 ## Risks
 - Control-surface-to-mic-gate latency (Stream Deck → Companion → Control API → mic gate) is a new round trip worth measuring early — PTT responsiveness matters for usability even if the absolute delay is small.
@@ -175,7 +190,6 @@ A self-contained mobile web client replacing today's stock VDO.ninja `/comms` pa
 - **Analog hardware input** — direct multichannel capture from a hardware audio interface, feeding the same render layer as another source type.
 - **Day 2 — Elevation** — add elevation on top of azimuth in the spatial data model, render layer, and UI (a sphere/dome instead of a flat ring).
 - **Day 2 — SIP** — register as a SIP extension against RTS, Clear-Com, or Riedel's SIP bridges (PJSIP/drachtio/sip.js), feeding the same render layer.
-- **Day 2 — Dedicated touchscreen control UI** — a purpose-built control web page beyond Companion's generic web-buttons panel; candidate place for a read-only spatial layout view, larger touch targets, anything Companion's panel can't express.
 - **Later — Dante/AES67** — Dante Virtual Soundcard (or AES67) as another input device option; the highest-fidelity, most universal way to tap real intercom systems.
 - **Mobile beltpack UX** — see dedicated section above; a separate self-contained client for other participants, full design already specified, build sequencing still post-v1.
 - **Later — other hardware platforms** — once the Pi/Mac mini software path is proven.

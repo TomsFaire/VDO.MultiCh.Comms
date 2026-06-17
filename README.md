@@ -2,7 +2,9 @@
 
 > **Early development.** Forked from [VDO.MultiCh.Comms](https://github.com/TomsFaire/VDO.MultiCh.Comms).
 
-Spatial binaural intercom built on [VDO.ninja](https://vdo.ninja). Each party line is positioned in a virtual space — drag it left, right, front, back — and the mix renders binaurally through headphones via Web Audio HRTF. Push-to-talk on one or more lines from a Stream Deck, tablet, or phone. Runs on a Mac mini or Raspberry Pi.
+Spatial binaural intercom built on [VDO.ninja](https://vdo.ninja). Each party line is positioned in a virtual space — drag it left, right, front, back — and the mix renders binaurally through headphones via Web Audio HRTF. Push-to-talk on one or more lines from a Stream Deck, tablet, or phone.
+
+Designed to run headless on a dedicated box (NUC, Mac mini, or Pi 5). The operator UI is a web app served by the app itself — open it on any browser on the network, no monitor on the audio host required.
 
 **Interoperates** with VDO.MultiCh.Comms: both apps share the same VDO.ninja room and party lines. A classic hardware-routed operator and a spatial operator can be on the same lines simultaneously.
 
@@ -13,25 +15,26 @@ Spatial binaural intercom built on [VDO.ninja](https://vdo.ninja). Each party li
 | Track | Status |
 |---|---|
 | Binaural PoC (static PannerNodes, HRTF verify) | 🔧 In progress |
-| Render Layer (live VDO lines → PannerNodes) | ⏳ Planned |
-| Radar UI (draggable spatial positions) | ⏳ Planned |
-| Talk-back core (per-channel inputSource, PTT) | ⏳ Planned |
-| Control API (HTTP/WebSocket, local) | ⏳ Planned |
-| Companion module | ⏳ Planned |
-| Presets | ⏳ Planned |
+| Render Layer (live VDO lines → PannerNodes) | ⏳ Planned — Phase 1 |
+| Web UI (radar view, settings, presets) | ⏳ Planned — Phase 2 |
+| Talk-back core (per-channel inputSource, PTT) | ⏳ Planned — Phase 3 |
+| Control API (HTTP/WebSocket, serves web UI) | ⏳ Planned — Phase 3 |
+| Companion module | ⏳ Planned — Phase 4 |
+| CLI installer (headless setup, systemd) | ⏳ Planned — Phase 5 |
+| Presets and polish | ⏳ Planned — Phase 5 |
 | Direct channels (1:1 private lines) | ⏳ Post-v1 |
 | Mobile beltpack web client | ⏳ Post-v1 |
 | Discrete multichannel HDMI/MADI backend | ⏳ Post-v1 |
 
-Full architecture: [docs/spatial-architecture.md](docs/spatial-architecture.md)
+Full architecture and phased plan: [docs/spatial-architecture.md](docs/spatial-architecture.md)
 
 ---
 
 ## How it relates to VDO.MultiCh.Comms
 
-VDO.MultiCh.Comms routes each party line to a dedicated hardware output channel via a CoreAudio N-API addon. This fork replaces that output model with a spatial binaural mix — all lines go through Web Audio `PannerNode`s into one stereo headphone output. There is no mode toggle; these are two separate products for different use cases.
+VDO.MultiCh.Comms routes each party line to a dedicated hardware output channel via a CoreAudio N-API addon. This fork replaces that output model with a spatial binaural mix — all lines go through Web Audio `PannerNode`s into one stereo headphone output. These are two separate products for different use cases; there is no mode toggle.
 
-The VDO ingestion layer (per-line `WebContentsView` + preload + IPC audio bridge) is inherited unchanged from VDO.MultiCh.Comms and is the shared transport contract. Session export codes (`comms_room` + group names) are compatible between both apps — an operator can share a session code and both clients join the same party lines.
+The VDO ingestion layer (per-line `WebContentsView` + preload + IPC audio bridge) is inherited unchanged. Session export codes (`comms_room` + group names) are compatible between both apps — share a session code and both clients join the same party lines.
 
 ---
 
@@ -40,22 +43,34 @@ The VDO ingestion layer (per-line `WebContentsView` + preload + IPC audio bridge
 ```
 VDO.ninja (WebRTC, per-line group)
   → WebContentsView + preload (IPC audio-frame, inherited from VDO.MultiCh.Comms)
-  → Main process IPC relay
-  → Spatial Mixer (main renderer, Web Audio)
+  → Spatial Mixer (hidden renderer, Web Audio)
       PannerNode[line0] ──┐
       PannerNode[line1] ──┼── AudioContext.destination → headphones
       PannerNode[lineN] ──┘
 
-Operator mic (getUserMedia or dedicated CoreAudio input)
+Operator mic (getUserMedia — no native addon needed for v1)
   → transmittingChannels gate (PTT / latch)
   → VDO.ninja push (per active line's group)
 
-Control API (local HTTP/WebSocket, inside Electron)
+Control API + Web UI (one HTTP/WebSocket server, one port)
+  ← Browser on any device (radar view, settings, presets)
   ← Bitfocus Companion module
-  ← Tablet / phone browser (Companion web-buttons panel, Day 1)
+  ← Electron window (same web page, if a monitor is attached)
 ```
 
+**The UI is a web app, not an Electron-native window.** Radar positioning, settings, presets, and Direct channel management are served by the Control API as a single web page — reachable from any browser on the network. Electron's own window just loads that same page when a local monitor is present. The audio host can run fully headless.
+
 Full detail: [docs/spatial-architecture.md](docs/spatial-architecture.md)
+
+---
+
+## Target hardware
+
+**Dev/PoC host:** 6th-gen i3 NUC (8GB RAM, 256GB SSD). Handles the v1 workload (Opus decode + HRTF convolution for 10–12 sources) with zero porting work — v1 needs no native addon at all.
+
+**Production options:** any x86 N100/N150 mini PC (Beelink, GMKtec, etc.) or Mac mini. Pi 5 is the realistic floor in the Pi family but currently cost-competitive with x86 mini PCs that offer more headroom and simpler HDMI audio paths.
+
+Pi 4 is **not recommended** — too underpowered for simultaneous WebRTC decode + HRTF convolution at the 10–12 participant target.
 
 ---
 
@@ -64,8 +79,9 @@ Full detail: [docs/spatial-architecture.md](docs/spatial-architecture.md)
 ### Prerequisites
 
 - Node.js 18+
-- macOS (Apple Silicon) or Raspberry Pi OS / Debian arm64 — both supported
-- CoreAudio native addon is **optional** — the app starts without it on Linux; used only for dedicated-input channels on macOS
+- macOS (Apple Silicon) or any Debian-based x86/arm64 Linux — both supported
+- CoreAudio native addon is **not required for v1** — used only for `dedicated`-type input channels (macOS) and the future HDMI backend
+- Linux headless: Xvfb or `--enable-offscreen-rendering` flags needed for Chromium with no display attached (exact flags TBD once tested on target hardware)
 
 ### Dev run
 
@@ -75,18 +91,15 @@ npm install
 npm start
 ```
 
-On macOS, if you want dedicated hardware input channels, build the native addon first:
-```bash
-cd app/native && npm install && npm run build
-```
+Config lives at `~/.vdo-multichan/config.json`.
 
 ### Binaural PoC (no Electron needed)
 
-Open `test/binaural-poc.html` in any browser with headphones. Confirms HRTF rendering works on the target platform before wiring into Electron.
+Open `test/binaural-poc.html` in any browser with headphones. Six static PannerNodes at fixed azimuths — confirms HRTF placement is audible on this platform before wiring into Electron.
 
 ### Config
 
-`~/.vdo-multichan/config.json` — same format as VDO.MultiCh.Comms, with additional optional spatial fields:
+`~/.vdo-multichan/config.json` — same base format as VDO.MultiCh.Comms, with additional optional spatial fields:
 
 ```json
 {
@@ -101,7 +114,7 @@ Open `test/binaural-poc.html` in any browser with headphones. Confirms HRTF rend
 }
 ```
 
-New fields default gracefully — a config saved by VDO.MultiCh.Comms loads and works without migration.
+New spatial fields default gracefully — a config saved by VDO.MultiCh.Comms loads without migration.
 
 ---
 
@@ -109,7 +122,7 @@ New fields default gracefully — a config saved by VDO.MultiCh.Comms loads and 
 
 | Doc | Contents |
 |-----|----------|
-| [docs/spatial-architecture.md](docs/spatial-architecture.md) | Full design: architecture, phases, data model, compatibility |
-| [docs/usage.md](docs/usage.md) | End-user guide (inherited from VDO.MultiCh.Comms, will be updated) |
+| [docs/spatial-architecture.md](docs/spatial-architecture.md) | Full design: architecture, phases, data model, platform notes |
+| [docs/usage.md](docs/usage.md) | End-user guide (inherited, will be updated) |
 | [docs/development.md](docs/development.md) | Build from source, CI |
 | [docs/self-hosting.md](docs/self-hosting.md) | VDO.ninja self-hosting, TURN |
