@@ -64,7 +64,7 @@ These are two separate products. VDO.MultiCh.Comms routes each party line to a d
 
 What they share: the VDO.ninja room and group names. A VDO.MultiCh.Comms operator and a VDO.Spacial.Comms operator can be on the same party lines simultaneously — each hears and talks the same lines, each app routes the audio differently on its own side. Session export codes are compatible: import a session from either app and you're in the same room.
 
-VDO.MultiCh.Comms has a [planned Direct Channels addition](https://github.com/TomsFaire/VDO.MultiCh.Comms/pull/10) so classic-app operators can eventually participate in Direct channels initiated from this app.
+Direct channel interoperability with VDO.MultiCh.Comms (so classic-app operators can participate in Direct channels initiated from this app) is planned but not yet built on either side.
 
 ---
 
