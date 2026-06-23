@@ -854,6 +854,10 @@ function meterColor(pct, isInput) {
   return isInput ? '#4caf50' : '#4a8abf';
 }
 
+window.api.onSpatialChannelUpdate((id, update) => {
+  updateSpatialChannel(id, update);
+});
+
 window.api.onAudioLevels(({ capture, playback }) => {
   if (!config) return;
   config.lines.forEach((line) => {

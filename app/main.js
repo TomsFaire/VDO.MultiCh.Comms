@@ -391,6 +391,7 @@ const DEFAULT_CONFIG = {
   webrtc_lan_mode: false,
   room_locked: false,
   lock_password: '',
+  controlApiPort: 8080,
   lines: [
     { id: 0, name: 'PL1', group: '1', input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
     { id: 1, name: 'PL2', group: '2', input_channel: 1, output_channel: 1, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
@@ -423,6 +424,7 @@ function migrateConfig(cfg) {
   if (cfg.webrtc_lan_mode == null)  cfg.webrtc_lan_mode = false;
   if (cfg.room_locked == null)      cfg.room_locked = false;
   if (cfg.lock_password == null)    cfg.lock_password = '';
+  if (cfg.controlApiPort == null)   cfg.controlApiPort = 8080;
   for (const line of cfg.lines || []) {
     if (!line.group) {
       if (line.room_key && cfg.comms_room && line.room_key.startsWith(cfg.comms_room)) {
@@ -587,6 +589,32 @@ app.whenReady().then(() => {
 
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  const controlApi = require('./spatial/controlApi');
+
+  function getSpatialState() {
+    return (cfg.lines || []).map((line) => {
+      const ch = cfg.spatial?.channels?.[line.id] || {};
+      return {
+        id: line.id,
+        label: line.name || `PL${line.id + 1}`,
+        azimuth: ch.azimuth ?? 0,
+        volume: ch.volume ?? 1,
+        listening: ch.listening ?? true,
+        active: false,
+      };
+    });
+  }
+
+  const api = controlApi.start(cfg, getSpatialState, (id, update) => {
+    if (!cfg.spatial) cfg.spatial = {};
+    if (!cfg.spatial.channels) cfg.spatial.channels = {};
+    if (!cfg.spatial.channels[id]) cfg.spatial.channels[id] = {};
+    Object.assign(cfg.spatial.channels[id], update);
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('spatial-channel-update', id, update);
+    }
+  });
+
   setInterval(() => {
     if (!mainWin || mainWin.isDestroyed()) return;
     const capture = {}, playback = {};
@@ -708,6 +736,7 @@ app.whenReady().then(() => {
       playbackSessionId,
     });
     console.log(`  url: ${url}`);
+    api.broadcastState(getSpatialState());
   });
 
   ipcMain.handle('disconnect-line', (_, id) => {
@@ -732,6 +761,7 @@ app.whenReady().then(() => {
     lineViews.delete(id);
     lineConfigs.delete(id);
     console.log(`Line ${id} disconnected`);
+    api.broadcastState(getSpatialState());
   });
 
   // CoreAudio IPC handlers
