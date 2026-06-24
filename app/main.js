@@ -3,15 +3,24 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const nativeAddonPath = app.isPackaged
-  ? path.join(process.resourcesPath, 'coreaudio.node')
-  : path.join(__dirname, 'native/build/Release/coreaudio.node');
-const coreAudio = require(nativeAddonPath);
+// CoreAudio addon is macOS-only and not used for v1 spatial binaural output
+// (which routes through Web Audio AudioContext.destination instead).
+// Optional require so the app starts on Linux/Pi without a native build.
+let coreAudio = null;
+try {
+  const nativeAddonPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'coreaudio.node')
+    : path.join(__dirname, 'native/build/Release/coreaudio.node');
+  coreAudio = require(nativeAddonPath);
+} catch (_) {
+  console.log('[audio] CoreAudio addon unavailable — running in Web Audio only mode');
+}
 
 const CONFIG_PATH = path.join(os.homedir(), '.vdo-multichan', 'config.json');
 
-function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIceServers) {
+function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIceServers, inputDeviceId, useWebGum) {
   const groupLiteral = JSON.stringify(String(groupName || ''));
+  const deviceIdLiteral = JSON.stringify(inputDeviceId || '');
   return `
 (function() {
   const INPUT_CH = ${inputChannel};
@@ -20,6 +29,8 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
   const GROUP = ${groupLiteral};
   const STRIP_ICE = ${stripIceServers ? 'true' : 'false'};
   const SAMPLE_RATE = 48000;
+  const USE_WEB_GUM = ${useWebGum ? 'true' : 'false'};
+  const GUM_DEVICE_ID = ${deviceIdLiteral};
 
   let _resolveStream;
   const _streamPromise = new Promise(r => { _resolveStream = r; });
@@ -51,6 +62,39 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
   (async function initPublishShim() {
     try {
       const { ipcRenderer } = require('electron');
+
+      if (USE_WEB_GUM) {
+        // CoreAudio unavailable — capture mic directly via getUserMedia + channel splitter
+        const constraints = { audio: {
+          ...(GUM_DEVICE_ID ? { deviceId: { exact: GUM_DEVICE_ID } } : {}),
+          channelCount: { ideal: INPUT_CH + 1 },
+          sampleRate: SAMPLE_RATE,
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        }};
+        try {
+          const micStream = await _origGUM(constraints);
+          const micCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+          const src = micCtx.createMediaStreamSource(micStream);
+          const numCh = micStream.getAudioTracks()[0]?.getSettings()?.channelCount || 1;
+          const dest = micCtx.createMediaStreamDestination();
+          if (INPUT_CH > 0 && numCh > INPUT_CH) {
+            const splitter = micCtx.createChannelSplitter(numCh);
+            const merger = micCtx.createChannelMerger(1);
+            src.connect(splitter);
+            splitter.connect(merger, INPUT_CH, 0);
+            merger.connect(dest);
+          } else {
+            src.connect(dest);
+          }
+          console.log('[shim-bridge] Web GUM ready device=' + (GUM_DEVICE_ID || 'default') + ' ch=' + INPUT_CH + '/' + numCh);
+          _resolveStream(dest.stream);
+        } catch (e) {
+          console.error('[shim-bridge] Web GUM failed:', e.message);
+          _resolveStream(null);
+        }
+        return;
+      }
+
       const audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
       await audioCtx.resume();
 
@@ -116,6 +160,7 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
   (async function initRemoteTap() {
     try {
       const { ipcRenderer } = require('electron');
+
       const tapCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
       await tapCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([\`
         class RemoteCapture extends AudioWorkletProcessor {
@@ -290,11 +335,15 @@ const DEFAULT_CONFIG = {
   input_device_uid: '',
   output_device_uid: '',
   sample_rate: 48000,
+  outputMode: 'classic',
+  spatialOutputDeviceId: '',   // empty string = system default device
+  spatialOutputChannels: 2,    // 2 = stereo, 6 = 5.1
   webrtc_turn_off: false,
   webrtc_stun_only: false,
   webrtc_lan_mode: false,
   room_locked: false,
   lock_password: '',
+  controlApiPort: 8080,
   lines: [
     { id: 0, name: 'PL1', group: '1', input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
     { id: 1, name: 'PL2', group: '2', input_channel: 1, output_channel: 1, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
@@ -321,11 +370,15 @@ function migrateConfig(cfg) {
     }
   }
   if (cfg.comms_password == null) cfg.comms_password = '';
+  if (cfg.outputMode == null) cfg.outputMode = 'classic';
+  if (cfg.spatialOutputDeviceId == null) cfg.spatialOutputDeviceId = '';
+  if (cfg.spatialOutputChannels == null) cfg.spatialOutputChannels = 2;
   if (cfg.webrtc_turn_off == null)  cfg.webrtc_turn_off = false;
   if (cfg.webrtc_stun_only == null) cfg.webrtc_stun_only = false;
   if (cfg.webrtc_lan_mode == null)  cfg.webrtc_lan_mode = false;
   if (cfg.room_locked == null)      cfg.room_locked = false;
   if (cfg.lock_password == null)    cfg.lock_password = '';
+  if (cfg.controlApiPort == null)   cfg.controlApiPort = 8080;
   for (const line of cfg.lines || []) {
     if (!line.group) {
       if (line.room_key && cfg.comms_room && line.room_key.startsWith(cfg.comms_room)) {
@@ -490,6 +543,32 @@ app.whenReady().then(() => {
 
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  const controlApi = require('./spatial/controlApi');
+
+  function getSpatialState() {
+    return (cfg.lines || []).map((line) => {
+      const ch = cfg.spatial?.channels?.[line.id] || {};
+      return {
+        id: line.id,
+        label: line.name || `PL${line.id + 1}`,
+        azimuth: ch.azimuth ?? 0,
+        volume: ch.volume ?? 1,
+        listening: ch.listening ?? true,
+        active: false,
+      };
+    });
+  }
+
+  const api = controlApi.start(cfg, getSpatialState, (id, update) => {
+    if (!cfg.spatial) cfg.spatial = {};
+    if (!cfg.spatial.channels) cfg.spatial.channels = {};
+    if (!cfg.spatial.channels[id]) cfg.spatial.channels[id] = {};
+    Object.assign(cfg.spatial.channels[id], update);
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('spatial-channel-update', id, update);
+    }
+  });
+
   setInterval(() => {
     if (!mainWin || mainWin.isDestroyed()) return;
     const capture = {}, playback = {};
@@ -552,7 +631,8 @@ app.whenReady().then(() => {
     const preloadPath = path.join(tempDir, `shim-line-${id}.js`);
     fs.writeFileSync(
       preloadPath,
-      buildLineShim(inputChannel ?? 0, outputChannel ?? 0, gainOut ?? 1.0, group ?? '', stripIce)
+      buildLineShim(inputChannel ?? 0, outputChannel ?? 0, gainOut ?? 1.0, group ?? '', stripIce,
+        line?.input_device_uid || cfg.input_device_uid || '', !coreAudio)
     );
 
     const view = createLineView(`persist:line-${id}`, preloadPath, url);
@@ -609,6 +689,7 @@ app.whenReady().then(() => {
       playbackSessionId,
     });
     console.log(`  url: ${url}`);
+    api.broadcastState(getSpatialState());
   });
 
   ipcMain.handle('disconnect-line', (_, id) => {
@@ -633,10 +714,12 @@ app.whenReady().then(() => {
     lineViews.delete(id);
     lineConfigs.delete(id);
     console.log(`Line ${id} disconnected`);
+    api.broadcastState(getSpatialState());
   });
 
-  // CoreAudio IPC handlers
-  ipcMain.handle('list-audio-devices', () => coreAudio.listDevices());
+  // CoreAudio IPC handlers — all guarded: coreAudio is null when the native addon
+  // isn't built (Linux, or Mac without a native build). Spatial mode doesn't need it.
+  ipcMain.handle('list-audio-devices', () => coreAudio ? coreAudio.listDevices() : []);
 
   ipcMain.handle('start-audio-capture', (_e, deviceUID, nChannels) => {
     try {
@@ -657,7 +740,7 @@ app.whenReady().then(() => {
 
   ipcMain.on('clear-playback', (_e, outCh) => {
     try {
-      coreAudio.clearPlaybackChannel(outCh ?? 0);
+      if (coreAudio) coreAudio.clearPlaybackChannel(outCh ?? 0);
     } catch (err) {
       console.error('clear-playback error:', err.message);
     }
@@ -682,22 +765,33 @@ app.whenReady().then(() => {
       if (peak < 0.002) return;
       playbackPeaks.set(outCh, Math.max(playbackPeaks.get(outCh) || 0, peak));
 
-      // Route to per-PL session if the sending view has its own session
-      let usedOwnSession = false;
+      // Resolve which line sent this frame.
       let foundLineId = null;
       for (const [lineId, view] of lineViews) {
-        if (view.webContents.id === event.sender.id) {
-          foundLineId = lineId;
-          const lc = lineConfigs.get(lineId);
-          if (lc?.hasOwnSession) {
-            const liveGain = outputGainByLineId.get(lineId) ?? 1.0;
-            coreAudio.pushPlaybackSamples(lc.playbackSessionId ?? `pl-${lineId}`, 0, floats, liveGain);
-            usedOwnSession = true;
-          }
-          break;
+        if (view.webContents.id === event.sender.id) { foundLineId = lineId; break; }
+      }
+
+      // Spatial mode: all lines feed ONE shared AudioContext in the main
+      // renderer (single destination + setSinkId). Forward the PCM there
+      // instead of pushing to a hardware channel via coreAudio.
+      if (cfg.outputMode === 'spatial') {
+        if (mainWin && !mainWin.isDestroyed()) {
+          mainWin.webContents.send('spatial-audio-frame', foundLineId, floats);
+        }
+        return;
+      }
+
+      // Classic mode — route to per-PL session if the sending view has its own session
+      let usedOwnSession = false;
+      if (foundLineId != null) {
+        const lc = lineConfigs.get(foundLineId);
+        if (lc?.hasOwnSession) {
+          const liveGain = outputGainByLineId.get(foundLineId) ?? 1.0;
+          if (coreAudio) coreAudio.pushPlaybackSamples(lc.playbackSessionId ?? `pl-${foundLineId}`, 0, floats, liveGain);
+          usedOwnSession = true;
         }
       }
-      if (!usedOwnSession) {
+      if (!usedOwnSession && coreAudio) {
         const liveGain = (foundLineId != null ? outputGainByLineId.get(foundLineId) : null) ?? 1.0;
         coreAudio.pushPlaybackSamples('default', outCh, floats, liveGain);
       }
@@ -713,11 +807,21 @@ app.whenReady().then(() => {
 
   ipcMain.handle('play-test-tone', (_e, channel, ms) => {
     try {
-      coreAudio.playTestTone(channel ?? 0, ms ?? 500);
+      if (coreAudio) coreAudio.playTestTone(channel ?? 0, ms ?? 500);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e.message };
     }
+  });
+
+  ipcMain.handle('open-spatial-ui', () => {
+    shell.openExternal(`http://localhost:${cfg.controlApiPort || 8080}`);
+  });
+
+  ipcMain.on('spatial-update-line', (_e, lineId, update) => {
+    const view = lineViews.get(lineId);
+    if (!view || view.webContents.isDestroyed()) return;
+    view.webContents.send('spatial-update', update);
   });
 
   // IPC handlers
@@ -726,9 +830,14 @@ app.whenReady().then(() => {
     return QRCode.toDataURL(text, { width: 120, margin: 1 });
   });
   ipcMain.handle('get-config', () => loadConfig());
-  ipcMain.handle('save-config', (_, cfg) => {
-    saveConfig(cfg);
-    updateGainCache(cfg);
+  ipcMain.handle('save-config', (_, newCfg) => {
+    saveConfig(newCfg);
+    updateGainCache(newCfg);
+    // Keep the long-lived cfg used by the playback-frame router in sync so a
+    // mode/device switch takes effect without restarting the app.
+    cfg.outputMode = newCfg.outputMode;
+    cfg.spatialOutputDeviceId = newCfg.spatialOutputDeviceId;
+    cfg.spatialOutputChannels = newCfg.spatialOutputChannels;
     return true;
   });
   ipcMain.handle('restart-playback', () => {

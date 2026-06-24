@@ -79,6 +79,22 @@
     .connect-btn { padding: 8px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; background: #2a5c2a; color: #7ec87e; transition: background 0.2s; }
     .connect-btn.connected { background: #5c2a2a; color: #c87e7e; }
     .connect-btn:hover { filter: brightness(1.2); }
+    .mode-pill { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; padding: 3px 8px; border-radius: 10px; text-transform: uppercase; white-space: nowrap; align-self: center; }
+    .mode-pill.spatial { background: #1a3a5c; color: #4a9eff; border: 1px solid #2a5a9a; }
+    .mode-pill.classic { background: #2a2a2a; color: #666; border: 1px solid #3a3a3a; }
+    .spatial-ui-btn { font-size: 12px; background: #1a3a5c; border: 1px solid #2a5a9a; color: #4a9eff; padding: 6px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+    .spatial-ui-btn:hover { background: #204870; }
+    .pan-section { display: none; gap: 10px; align-items: center; padding-top: 8px; }
+    .pan-section.spatial-visible { display: flex; }
+    .pan-radar { display: block; flex-shrink: 0; cursor: crosshair; user-select: none; }
+    .pan-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+    .pan-readout { font-size: 11px; color: #888; font-family: monospace; }
+    .pan-listen-btn { font-size: 11px; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; font-weight: 600; background: #1a3c1a; color: #4caf50; }
+    .pan-listen-btn.muted { background: #2a2a2a; color: #666; }
+    .pan-listen-btn:hover { filter: brightness(1.2); }
+    /* Spatial mode mixes all lines into one shared output device, so the
+       per-line hardware output selectors are irrelevant and hidden. */
+    body.spatial-mode .out-device-row, body.spatial-mode .out-channel-row { display: none; }
 
     .director-row { display: flex; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid #2e2e2e; }
     .director-label { font-size: 11px; color: #666; white-space: nowrap; }
@@ -228,6 +244,8 @@
       </div>
     </div>
     <button id="lock-room-btn" onclick="toggleRoomLock()" title="Lock room to prevent new participants joining">Lock room</button>
+    <span id="mode-pill" class="mode-pill classic">Classic</span>
+    <button id="spatial-ui-btn" class="spatial-ui-btn" onclick="openSpatialUI()" style="display:none">Spatial UI ↗</button>
   </section>
 
   <div id="lines"></div>
@@ -281,6 +299,27 @@
         </div>
         <div class="test-status" id="test-status"></div>
       </div>
+      <div class="settings-row">
+        <label>Output mode</label>
+        <select id="output-mode-select">
+          <option value="classic">Classic (dedicated hardware per line)</option>
+          <option value="spatial">Spatial (binaural render)</option>
+        </select>
+      </div>
+      <div class="settings-row" id="spatial-output-row" style="display:none">
+        <label>Spatial output device</label>
+        <select id="spatial-output-device-select">
+          <option value="">System default</option>
+        </select>
+        <span style="font-size:10px;color:#555;">All party lines mix into one spatial render sent to this device.</span>
+      </div>
+      <div class="settings-row" id="spatial-channels-row" style="display:none">
+        <label>Channels</label>
+        <select id="spatial-channels-select">
+          <option value="2">Stereo (2)</option>
+          <option value="6">5.1 (6)</option>
+        </select>
+      </div>
       <hr class="settings-divider" />
       <div class="settings-section-heading">Session</div>
       <div class="settings-row">
@@ -306,6 +345,7 @@
     <span id="build-label">v0.0.1 build 1</span>
   </footer>
 
+  <script src="../spatial/spatialMixer.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

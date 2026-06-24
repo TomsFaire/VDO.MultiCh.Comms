@@ -6,69 +6,109 @@ on:
       - 'v*.*.*'
 
 jobs:
-  build-electron:
-    name: Build Electron app and publish release
+  build-mac:
+    name: Build Mac DMGs
     runs-on: macos-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout (full history for release notes)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      - name: Install Node dependencies
+      - name: Install dependencies
         working-directory: app
         run: npm ci
 
-      - name: Build CoreAudio native addon
-        working-directory: app/native
-        run: |
-          npm install
-          npm run build
-
-      - name: Build DMG
+      - name: Build DMGs (arm64 + x64)
         working-directory: app
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build
 
-      - name: Ad-hoc sign DMG
+      - name: Ad-hoc sign DMGs
         run: codesign --force --deep --sign - app/dist/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dist
+          path: app/dist/*.dmg
+
+  build-linux:
+    name: Build Linux packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build AppImages + debs (arm64 + x64)
+        working-directory: app
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            app/dist/*.AppImage
+            app/dist/*.deb
+
+  release:
+    name: Publish release
+    needs: [build-mac, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-dist
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-dist
+          path: dist
 
       - name: Generate SHA-256 checksums
         run: |
-          cd app/dist
-          shasum -a 256 *.dmg > sha256sums.txt
+          cd dist
+          sha256sum * > sha256sums.txt
           cat sha256sums.txt
 
       - name: Generate release notes
-        id: release_notes
         run: |
-          # Get previous tag; fall back to initial commit if this is the first tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
-          echo "Generating notes from ${PREV_TAG} to HEAD"
           git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" > release-notes.md
-          echo "" >> release-notes.md
-          cat release-notes.md
 
-      - name: Extract version from tag
+      - name: Extract version
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v${{ steps.version.outputs.VERSION }} — VDO.MultiCh.Comms"
+          name: "v${{ steps.version.outputs.VERSION }} — VDO.Spacial.Comms"
           body_path: release-notes.md
           files: |
-            app/dist/*.dmg
-            app/dist/sha256sums.txt
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/sha256sums.txt
           fail_on_unmatched_files: true

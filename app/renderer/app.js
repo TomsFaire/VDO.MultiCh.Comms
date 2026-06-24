@@ -1,6 +1,7 @@
 let config = null;
 let inputChannelCount = 2;
 let outputChannelCount = 2;
+const spatialChannels = {}; // { [id]: { azimuth, listening } }
 
 async function renderQr(id, url) {
   const img = document.getElementById(`qr-${id}`);
@@ -16,13 +17,29 @@ const lineStates = {}; // { [id]: { connected: boolean } }
 
 async function connectShim() {
   const devices = await window.api.listAudioDevices();
+  if (devices.length > 0) {
+    shimDevices = {
+      inputs:  devices.filter(d => d.inChannels  > 0).map(d => ({
+        name: d.name, uid: d.uid, channels: d.inChannels,
+      })),
+      outputs: devices.filter(d => d.outChannels > 0).map(d => ({
+        name: d.name, uid: d.uid, channels: d.outChannels,
+      })),
+    };
+    return;
+  }
+  // CoreAudio unavailable — enumerate via Web Audio API instead
+  try {
+    // getUserMedia first to unlock device labels (required by browser security model)
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop());
+  } catch (_) {}
+  const webDevs = await navigator.mediaDevices.enumerateDevices();
   shimDevices = {
-    inputs:  devices.filter(d => d.inChannels  > 0).map(d => ({
-      name: d.name, uid: d.uid, channels: d.inChannels,
-    })),
-    outputs: devices.filter(d => d.outChannels > 0).map(d => ({
-      name: d.name, uid: d.uid, channels: d.outChannels,
-    })),
+    inputs:  webDevs.filter(d => d.kind === 'audioinput' && d.deviceId !== 'communications')
+               .map(d => ({ name: d.label || d.deviceId, uid: d.deviceId, channels: 2 })),
+    outputs: webDevs.filter(d => d.kind === 'audiooutput' && d.deviceId !== 'communications')
+               .map(d => ({ name: d.label || d.deviceId, uid: d.deviceId, channels: 2 })),
   };
 }
 
@@ -52,6 +69,38 @@ function populateLineDeviceDropdown(select, devices, currentUid) {
     if (d.uid === currentUid) opt.selected = true;
     select.appendChild(opt);
   });
+}
+
+// Spatial mode routes through the Web Audio AudioContext, so its output device
+// list comes from the browser (enumerateDevices), not the CoreAudio addon.
+async function populateSpatialOutputDevices() {
+  const sel = document.getElementById('spatial-output-device-select');
+  if (!sel) return;
+  let devices = [];
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (e) {
+    console.warn('enumerateDevices failed:', e);
+  }
+  const outs = devices.filter((d) => d.kind === 'audiooutput');
+  sel.innerHTML = '<option value="">System default</option>';
+  outs.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Output ${(d.deviceId || '').slice(0, 8)}`;
+    if (d.deviceId === config.spatialOutputDeviceId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+// Show/hide the spatial output controls vs the per-line hardware output
+// selectors depending on the currently chosen output mode.
+function applySettingsModeVisibility(mode) {
+  const isSpatial = mode === 'spatial';
+  const spatialRow = document.getElementById('spatial-output-row');
+  const channelsRow = document.getElementById('spatial-channels-row');
+  if (spatialRow) spatialRow.style.display = isSpatial ? '' : 'none';
+  if (channelsRow) channelsRow.style.display = isSpatial ? '' : 'none';
 }
 
 function findInputDevice() {
@@ -152,6 +201,14 @@ async function init() {
   updateChannelDropdowns();
   if (config.input_device_uid || config.input_device) {
     await startCaptureForConfig();
+  }
+  updateModeIndicator();
+  if (config.outputMode === 'spatial') {
+    try {
+      await window.spatialMixer.start(config.spatialOutputDeviceId || '', config.spatialOutputChannels || 2);
+    } catch (e) {
+      console.error('spatialMixer.start failed:', e);
+    }
   }
 }
 
@@ -353,7 +410,7 @@ function renderLines() {
           <option value="">Using global</option>
         </select>
       </div>
-      <div class="device-row">
+      <div class="device-row out-device-row">
         <label>Out device</label>
         <select id="dev-out-${line.id}" data-line="${line.id}" data-dir="out">
           <option value="">Using global</option>
@@ -365,7 +422,7 @@ function renderLines() {
           ${channelOptions(line.input_channel, inputChannelCount)}
         </select>
       </div>
-      <div class="channel-row">
+      <div class="channel-row out-channel-row">
         <label>Out</label>
         <select id="ch-out-${line.id}" data-line="${line.id}" data-dir="out" title="Hardware output 1–${outputChannelCount}">
           ${channelOptions(line.output_channel, outputChannelCount)}
@@ -383,9 +440,61 @@ function renderLines() {
         <span id="gain-out-val-${line.id}">${line.gain_out.toFixed(2)}</span>
       </div>
       <button class="connect-btn" id="connect-${line.id}" onclick="toggleConnect(${line.id})">Connect</button>
+      <div class="pan-section" id="pan-section-${line.id}">
+        <svg class="pan-radar" id="pan-radar-${line.id}" viewBox="0 0 80 80" width="80" height="80">
+          <circle cx="40" cy="40" r="36" fill="#1a1a1a" stroke="#333" stroke-width="1"/>
+          <circle cx="40" cy="40" r="24" fill="none" stroke="#2a2a2a" stroke-width="1"/>
+          <circle cx="40" cy="40" r="12" fill="none" stroke="#2a2a2a" stroke-width="1"/>
+          <line x1="40" y1="4" x2="40" y2="76" stroke="#2a2a2a" stroke-width="1"/>
+          <line x1="4" y1="40" x2="76" y2="40" stroke="#2a2a2a" stroke-width="1"/>
+          <text x="40" y="7" text-anchor="middle" fill="#444" font-size="5">F</text>
+          <text x="40" y="77" text-anchor="middle" fill="#444" font-size="5">B</text>
+          <text x="5" y="42" text-anchor="middle" fill="#444" font-size="5">L</text>
+          <text x="75" y="42" text-anchor="middle" fill="#444" font-size="5">R</text>
+          <circle cx="40" cy="40" r="2.5" fill="#666"/>
+          <circle id="pan-thumb-${line.id}" cx="40" cy="4" r="5" fill="#4a9eff" style="filter:drop-shadow(0 0 3px rgba(74,158,255,0.6));cursor:grab"/>
+        </svg>
+        <div class="pan-side">
+          <span class="pan-readout" id="pan-readout-${line.id}">0° (Front)</span>
+          <button class="pan-listen-btn" id="pan-listen-${line.id}" onclick="toggleSpatialListen(${line.id})">Listen</button>
+        </div>
+      </div>
     `;
 
     container.appendChild(panel);
+
+    spatialChannels[line.id] = spatialChannels[line.id] || { azimuth: 0, listening: true };
+    syncPanUI(line.id, spatialChannels[line.id]);
+
+    const radar = document.getElementById(`pan-radar-${line.id}`);
+    if (radar) {
+      const CX = 40, CY = 40, R = 31;
+      let dragging = false;
+      const getAz = (e) => {
+        const rect = radar.getBoundingClientRect();
+        const scale = 80 / rect.width;
+        const dx = (e.clientX - rect.left) * scale - CX;
+        const dy = (e.clientY - rect.top)  * scale - CY;
+        return Math.atan2(dx, -dy) * 180 / Math.PI;
+      };
+      radar.addEventListener('mousedown', (e) => {
+        dragging = true;
+        e.preventDefault();
+        updateSpatialChannel(line.id, { azimuth: getAz(e) });
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        updateSpatialChannel(line.id, { azimuth: getAz(e) });
+      });
+      document.addEventListener('mouseup', (e) => {
+        if (!dragging) return;
+        dragging = false;
+        updateSpatialChannel(line.id, { azimuth: Math.round(getAz(e) * 10) / 10 });
+      });
+      radar.addEventListener('dblclick', () => {
+        updateSpatialChannel(line.id, { azimuth: 0 });
+      });
+    }
 
     // Populate device dropdowns for this line
     populateLineDeviceDropdown(
@@ -500,9 +609,77 @@ async function toggleConnect(id) {
       line.gain_out,
       getLineGroup(line)
     );
+    if (config.outputMode === 'spatial') {
+      const channelState = config.spatial?.channels?.[id] ?? {};
+      window.spatialMixer.connect(id, channelState);
+    }
   } else {
+    if (config.outputMode === 'spatial') window.spatialMixer.disconnect(id);
     await window.api.disconnectLine(id);
   }
+}
+
+function azimuthLabel(az) {
+  if (az === 0) return '0° (Front)';
+  return az < 0 ? `L ${Math.abs(az).toFixed(1)}°` : `R ${az.toFixed(1)}°`;
+}
+
+function syncPanUI(id, channelState) {
+  const thumb = document.getElementById(`pan-thumb-${id}`);
+  const readout = document.getElementById(`pan-readout-${id}`);
+  const listenBtn = document.getElementById(`pan-listen-${id}`);
+  if (!thumb || !readout) return;
+  const az = channelState.azimuth ?? 0;
+  const rad = (az * Math.PI) / 180;
+  const R = 31, CX = 40, CY = 40;
+  thumb.setAttribute('cx', CX + Math.sin(rad) * R);
+  thumb.setAttribute('cy', CY - Math.cos(rad) * R);
+  readout.textContent = azimuthLabel(az);
+  if (listenBtn) {
+    const listening = channelState.listening !== false;
+    listenBtn.textContent = listening ? 'Listen' : 'Muted';
+    listenBtn.classList.toggle('muted', !listening);
+  }
+}
+
+function updateSpatialChannel(id, update) {
+  if (config.outputMode !== 'spatial') return;
+  if (!config.spatial) config.spatial = { channels: {} };
+  if (!config.spatial.channels) config.spatial.channels = {};
+  Object.assign(config.spatial.channels[id] = config.spatial.channels[id] ?? {}, update);
+  spatialChannels[id] = Object.assign(spatialChannels[id] || { azimuth: 0, listening: true }, update);
+  syncPanUI(id, spatialChannels[id]);
+  // Drive the single shared mixer running in this renderer window.
+  if (update.azimuth !== undefined) window.spatialMixer.updatePosition(id, update.azimuth);
+  if (update.volume !== undefined) window.spatialMixer.updateVolume(id, update.volume);
+  if (update.listening !== undefined) window.spatialMixer.setListening(id, update.listening);
+  window.api.sendSpatialUpdate(id, update);
+}
+
+function toggleSpatialListen(id) {
+  const ch = spatialChannels[id] || { azimuth: 0, listening: true };
+  updateSpatialChannel(id, { listening: !ch.listening });
+}
+
+function updateModeIndicator() {
+  const isSpatial = config?.outputMode === 'spatial';
+  const pill = document.getElementById('mode-pill');
+  const spatialBtn = document.getElementById('spatial-ui-btn');
+  if (pill) {
+    pill.textContent = isSpatial ? 'Spatial' : 'Classic';
+    pill.className = `mode-pill ${isSpatial ? 'spatial' : 'classic'}`;
+  }
+  if (spatialBtn) spatialBtn.style.display = isSpatial ? '' : 'none';
+  document.querySelectorAll('.pan-section').forEach(el => {
+    el.classList.toggle('spatial-visible', isSpatial);
+  });
+  // Spatial mode hides the per-line hardware output selectors (the single
+  // shared spatial device replaces them).
+  document.body.classList.toggle('spatial-mode', isSpatial);
+}
+
+function openSpatialUI() {
+  window.api.openSpatialUI();
 }
 
 async function copyQrImage() {
@@ -729,6 +906,10 @@ function setupSettings() {
     document.getElementById('output-ch-override').value = config.output_channels_override || '';
     document.getElementById('comms-room-input').value = config.comms_room || '';
     document.getElementById('comms-password').value = config.comms_password || '';
+    document.getElementById('output-mode-select').value = config.outputMode || 'classic';
+    await populateSpatialOutputDevices();
+    document.getElementById('spatial-channels-select').value = String(config.spatialOutputChannels || 2);
+    applySettingsModeVisibility(config.outputMode || 'classic');
     // Pre-populate export code
     document.getElementById('session-export-code').value = exportSession();
     document.getElementById('session-export-msg').textContent = '';
@@ -770,6 +951,10 @@ function setupSettings() {
     customRow.style.display = isCustom ? 'flex' : 'none';
   });
 
+  document.getElementById('output-mode-select').addEventListener('change', (e) => {
+    applySettingsModeVisibility(e.target.value);
+  });
+
   testBtn.addEventListener('click', async () => {
     const url = customUrl.value.trim();
     if (!url) return;
@@ -809,6 +994,9 @@ function setupSettings() {
       config.lock_password = '';
     }
     config.comms_password = document.getElementById('comms-password').value.trim();
+    config.outputMode = document.getElementById('output-mode-select').value || 'classic';
+    config.spatialOutputDeviceId = document.getElementById('spatial-output-device-select').value || '';
+    config.spatialOutputChannels = parseInt(document.getElementById('spatial-channels-select').value, 10) || 2;
     // Apply channel count overrides (or detected values from shim)
     const inOverride = parseInt(document.getElementById('input-ch-override').value) || 0;
     const outOverride = parseInt(document.getElementById('output-ch-override').value) || 0;
@@ -819,6 +1007,23 @@ function setupSettings() {
     outputChannelCount = outOverride || detected.outCount;
     updateChannelDropdowns();
     await window.api.saveConfig(config);
+    updateModeIndicator();
+    // (Re)build the shared spatial mixer with the saved device/channels.
+    // teardown() is a no-op if it was never started (e.g. classic mode).
+    window.spatialMixer.teardown();
+    if (config.outputMode === 'spatial') {
+      try {
+        await window.spatialMixer.start(config.spatialOutputDeviceId || '', config.spatialOutputChannels || 2);
+        // Re-attach any lines that are currently connected.
+        config.lines.forEach((line) => {
+          if (lineStates[line.id]?.connected) {
+            window.spatialMixer.connect(line.id, config.spatial?.channels?.[line.id] ?? {});
+          }
+        });
+      } catch (e) {
+        console.error('spatialMixer.start failed:', e);
+      }
+    }
     if (config.input_device_uid) {
       await startCaptureForConfig();
     } else {
@@ -835,6 +1040,14 @@ function meterColor(pct, isInput) {
   if (pct >= 60) return '#f9a825';
   return isInput ? '#4caf50' : '#4a8abf';
 }
+
+window.api.onSpatialChannelUpdate((id, update) => {
+  updateSpatialChannel(id, update);
+});
+
+window.api.onSpatialAudioFrame((lineId, samples) => {
+  window.spatialMixer.feedFrame(lineId, samples);
+});
 
 window.api.onAudioLevels(({ capture, playback }) => {
   if (!config) return;

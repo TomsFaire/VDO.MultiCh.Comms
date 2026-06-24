@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VDO.Spacial.Comms — Spatial Mix</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: #111;
+      border-bottom: 1px solid #2a2a2a;
+    }
+    header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.4px; color: #ccc; }
+
+    #ws-status {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 3px 10px;
+      border-radius: 10px;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #888;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    #ws-status.connected { color: #7ec87e; border-color: #2a5c2a; }
+    #ws-status.disconnected { color: #888; border-color: #333; }
+
+    /* ── Main layout ────────────────────────────────────────── */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 16px;
+      gap: 24px;
+    }
+
+    /* ── Radar ──────────────────────────────────────────────── */
+    #radar-wrap {
+      position: relative;
+      user-select: none;
+    }
+
+    #radar-svg {
+      display: block;
+      cursor: default;
+      transition: opacity 0.3s;
+    }
+
+    #radar-svg.disconnected { opacity: 0.35; }
+
+    /* ── Line list ──────────────────────────────────────────── */
+    #line-list {
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .line-row {
+      background: #1a1a1a;
+      border: 1px solid #2e2e2e;
+      border-radius: 6px;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: border-color 0.2s;
+    }
+
+    .line-row.active-talking { border-color: var(--line-color, #555); }
+
+    .line-row-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .line-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--line-color, #555);
+    }
+
+    .line-name {
+      flex: 1;
+      font-size: 13px;
+      font-weight: 600;
+      color: #ddd;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .line-azimuth {
+      font-size: 11px;
+      color: #666;
+      font-family: monospace;
+      width: 52px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    .listen-btn {
+      flex-shrink: 0;
+      padding: 4px 12px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      background: #2a2a2a;
+      color: #666;
+      transition: background 0.15s, color 0.15s;
+    }
+    .listen-btn.on { background: #1e4a1e; color: #7ec87e; }
+    .listen-btn:hover { filter: brightness(1.2); }
+
+    .line-row-volume {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .vol-label {
+      font-size: 10px;
+      color: #555;
+      width: 22px;
+      flex-shrink: 0;
+    }
+
+    .vol-slider {
+      flex: 1;
+      accent-color: #4a8a6a;
+      cursor: pointer;
+    }
+
+    .vol-value {
+      font-size: 10px;
+      color: #666;
+      font-family: monospace;
+      width: 34px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* ── Disconnected overlay text ─────────────────────────── */
+    #disconnected-msg {
+      display: none;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 13px;
+      color: #555;
+      pointer-events: none;
+      text-align: center;
+    }
+    #disconnected-msg.visible { display: block; }
+
+    footer {
+      padding: 6px 20px;
+      background: #111;
+      border-top: 1px solid #1e1e1e;
+      display: flex;
+      justify-content: flex-end;
+    }
+    footer span { font-size: 10px; color: #333; font-family: monospace; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>VDO.Spacial.Comms — Spatial Mix</h1>
+  <span id="ws-status" class="disconnected">Disconnected</span>
+</header>
+
+<main>
+  <div id="radar-wrap">
+    <svg id="radar-svg" class="disconnected" width="420" height="420" viewBox="0 0 420 420">
+      <!-- Rings and grid drawn by JS -->
+      <g id="radar-bg"></g>
+      <!-- Compass labels -->
+      <g id="radar-labels"></g>
+      <!-- Markers for each line -->
+      <g id="radar-markers"></g>
+    </svg>
+    <div id="disconnected-msg" class="visible">Waiting for connection…</div>
+  </div>
+
+  <div id="line-list">
+    <!-- Populated by JS -->
+  </div>
+</main>
+
+<footer>
+  <span>VDO.Spacial.Comms spatial radar</span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Constants ──────────────────────────────────────────────────────────────
+  const SVG_SIZE     = 420;
+  const CENTER       = SVG_SIZE / 2;            // 210
+  const OUTER_R      = 190;                     // outermost ring radius
+  const MARKER_R     = 18;                      // marker circle radius (36px diameter)
+  const PAD          = 8;
+  const DRAG_R       = OUTER_R - MARKER_R - PAD; // usable drag radius
+
+  const RING_RADII   = [OUTER_R * 0.33, OUTER_R * 0.66, OUTER_R];
+  const COMPASS      = [
+    { label: 'F', angle:   0 },
+    { label: 'R', angle:  90 },
+    { label: 'B', angle: 180 },
+    { label: 'L', angle: 270 },
+  ];
+
+  // Muted, distinct hues for up to ~8 lines. Evenly distributed in HSL.
+  function lineColor(id) {
+    const hue = (id * 137.5) % 360;          // golden-angle step for max separation
+    return `hsl(${hue},45%,52%)`;
+  }
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let lines   = [];                            // array of { id, label, azimuth, volume, listening, active }
+  let ws      = null;
+  let wsPort  = null;
+  let reconnectTimer = null;
+
+  // Drag state
+  let dragState = null;  // { id, markerId, startAz }
+
+  // ── SVG helpers ───────────────────────────────────────────────────────────
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  }
+
+  function azToXY(azDeg, radius) {
+    const rad = azDeg * Math.PI / 180;
+    const x   = Math.sin(rad) * radius;
+    const y   = -Math.cos(rad) * radius;
+    return { x: CENTER + x, y: CENTER + y };
+  }
+
+  function xyToAz(svgX, svgY) {
+    const dx = svgX - CENTER;
+    const dy = svgY - CENTER;
+    return Math.atan2(dx, -dy) * 180 / Math.PI;
+  }
+
+  function clampRadius(svgX, svgY) {
+    const dx  = svgX - CENTER;
+    const dy  = svgY - CENTER;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return { x: CENTER, y: CENTER };
+    if (len > DRAG_R) {
+      return {
+        x: CENTER + (dx / len) * DRAG_R,
+        y: CENTER + (dy / len) * DRAG_R,
+      };
+    }
+    return { x: svgX, y: svgY };
+  }
+
+  // ── Build static radar background (runs once) ─────────────────────────────
+  function buildRadarBG() {
+    const bg = document.getElementById('radar-bg');
+    bg.innerHTML = '';
+
+    // Filled radar circle
+    bg.appendChild(svgEl('circle', {
+      cx: CENTER, cy: CENTER, r: OUTER_R,
+      fill: '#1a1a1a', stroke: '#282828', 'stroke-width': '1',
+    }));
+
+    // Concentric rings
+    for (const r of RING_RADII) {
+      bg.appendChild(svgEl('circle', {
+        cx: CENTER, cy: CENTER, r,
+        fill: 'none', stroke: '#2c2c2c', 'stroke-width': '1',
+      }));
+    }
+
+    // Cross-hairs
+    bg.appendChild(svgEl('line', { x1: CENTER, y1: CENTER - OUTER_R, x2: CENTER, y2: CENTER + OUTER_R, stroke: '#252525', 'stroke-width': '1' }));
+    bg.appendChild(svgEl('line', { x1: CENTER - OUTER_R, y1: CENTER, x2: CENTER + OUTER_R, y2: CENTER, stroke: '#252525', 'stroke-width': '1' }));
+
+    // Listener dot
+    bg.appendChild(svgEl('circle', {
+      cx: CENTER, cy: CENTER, r: 5,
+      fill: '#555', stroke: '#777', 'stroke-width': '1.5',
+    }));
+
+    // Compass labels
+    const lGroup = document.getElementById('radar-labels');
+    lGroup.innerHTML = '';
+    for (const { label, angle } of COMPASS) {
+      const rad  = angle * Math.PI / 180;
+      const dist = OUTER_R + 16;
+      const lx   = CENTER + Math.sin(rad) * dist;
+      const ly   = CENTER - Math.cos(rad) * dist;
+      const t = svgEl('text', {
+        x: lx, y: ly,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'central',
+        fill: '#555',
+        'font-size': '12',
+        'font-family': 'system-ui, sans-serif',
+        'font-weight': '600',
+      });
+      t.textContent = label;
+      lGroup.appendChild(t);
+    }
+  }
+
+  // ── Render markers ────────────────────────────────────────────────────────
+  function renderMarkers() {
+    const g = document.getElementById('radar-markers');
+    g.innerHTML = '';
+
+    for (const line of lines) {
+      const color   = lineColor(line.id);
+      const { x, y } = azToXY(line.azimuth, DRAG_R);
+      const gEl     = svgEl('g', { id: `marker-${line.id}`, style: 'cursor:grab' });
+      gEl.dataset.origX = x;
+      gEl.dataset.origY = y;
+
+      // Active pulsing ring
+      if (line.active) {
+        const pulse = svgEl('circle', {
+          cx: x, cy: y, r: MARKER_R + 6,
+          fill: 'none',
+          stroke: color,
+          'stroke-width': '2',
+          opacity: '0.6',
+        });
+        pulse.innerHTML = `
+          <animate attributeName="r" values="${MARKER_R + 4};${MARKER_R + 10};${MARKER_R + 4}" dur="1.2s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="0.6;0.1;0.6" dur="1.2s" repeatCount="indefinite"/>
+        `;
+        gEl.appendChild(pulse);
+      }
+
+      // Marker body
+      gEl.appendChild(svgEl('circle', {
+        cx: x, cy: y, r: MARKER_R,
+        fill: color,
+        stroke: line.active ? '#fff' : 'transparent',
+        'stroke-width': '1.5',
+        opacity: line.listening ? '1' : '0.4',
+      }));
+
+      // Label text (truncate long labels)
+      const label = line.label.length > 5 ? line.label.slice(0, 5) : line.label;
+      gEl.appendChild(svgEl('text', {
+        x, y,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'central',
+        fill: '#111',
+        'font-size': '11',
+        'font-family': 'system-ui, sans-serif',
+        'font-weight': '700',
+        'pointer-events': 'none',
+      })).textContent = label;
+
+      // Not-listening X overlay
+      if (!line.listening) {
+        const sz = 5;
+        gEl.appendChild(svgEl('line', { x1: x - sz, y1: y - sz, x2: x + sz, y2: y + sz, stroke: '#fff', 'stroke-width': '1.5', 'pointer-events': 'none', opacity: '0.6' }));
+        gEl.appendChild(svgEl('line', { x1: x + sz, y1: y - sz, x2: x - sz, y2: y + sz, stroke: '#fff', 'stroke-width': '1.5', 'pointer-events': 'none', opacity: '0.6' }));
+      }
+
+      // Drag events
+      gEl.addEventListener('mousedown',  onMarkerMouseDown);
+      gEl.addEventListener('touchstart', onMarkerTouchStart, { passive: false });
+
+      g.appendChild(gEl);
+    }
+  }
+
+  // ── Render line list (below radar) ────────────────────────────────────────
+  function renderLineList() {
+    const container = document.getElementById('line-list');
+    container.innerHTML = '';
+
+    for (const line of lines) {
+      const color = lineColor(line.id);
+      const row   = document.createElement('div');
+      row.className = 'line-row' + (line.active ? ' active-talking' : '');
+      row.id = `line-row-${line.id}`;
+      row.style.setProperty('--line-color', color);
+
+      row.innerHTML = `
+        <div class="line-row-top">
+          <div class="line-dot"></div>
+          <span class="line-name">${escHtml(line.label)}</span>
+          <span class="line-azimuth" id="az-${line.id}">${formatAz(line.azimuth)}</span>
+          <button class="listen-btn ${line.listening ? 'on' : ''}" data-id="${line.id}">
+            ${line.listening ? 'Listen' : 'Muted'}
+          </button>
+        </div>
+        <div class="line-row-volume">
+          <span class="vol-label">Vol</span>
+          <input
+            type="range"
+            class="vol-slider"
+            min="0" max="100" step="1"
+            value="${Math.round(line.volume * 100)}"
+            data-id="${line.id}"
+          />
+          <span class="vol-value" id="vol-${line.id}">${Math.round(line.volume * 100)}%</span>
+        </div>
+      `;
+
+      // Listen toggle
+      row.querySelector('.listen-btn').addEventListener('click', (e) => {
+        const id  = parseInt(e.currentTarget.dataset.id, 10);
+        const ln  = lines.find(l => l.id === id);
+        if (!ln) return;
+        ln.listening = !ln.listening;
+        sendUpdate({ id, listening: ln.listening });
+        renderLineList();
+        renderMarkers();
+      });
+
+      // Volume slider — send on change (not input) to avoid flooding
+      const slider = row.querySelector('.vol-slider');
+      slider.addEventListener('input', (e) => {
+        const id  = parseInt(e.target.dataset.id, 10);
+        const pct = parseInt(e.target.value, 10);
+        const volEl = document.getElementById(`vol-${id}`);
+        if (volEl) volEl.textContent = pct + '%';
+      });
+      slider.addEventListener('change', (e) => {
+        const id  = parseInt(e.target.dataset.id, 10);
+        const pct = parseInt(e.target.value, 10);
+        const ln  = lines.find(l => l.id === id);
+        if (ln) ln.volume = pct / 100;
+        sendUpdate({ id, volume: pct / 100 });
+      });
+
+      container.appendChild(row);
+    }
+  }
+
+  // ── Drag handling ─────────────────────────────────────────────────────────
+  function markerIdFromEl(el) {
+    const g = el.closest('g[id^="marker-"]');
+    if (!g) return null;
+    return parseInt(g.id.replace('marker-', ''), 10);
+  }
+
+  function getSvgPoint(svg, clientX, clientY) {
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse());
+  }
+
+  function onMarkerMouseDown(e) {
+    if (e.button !== 0) return;
+    const id = markerIdFromEl(e.currentTarget);
+    if (id === null) return;
+    e.preventDefault();
+    dragState = { id };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup',   onMouseUp);
+  }
+
+  function onMarkerTouchStart(e) {
+    const id = markerIdFromEl(e.currentTarget);
+    if (id === null) return;
+    e.preventDefault();
+    dragState = { id };
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
+    document.addEventListener('touchend',  onTouchEnd);
+  }
+
+  function onMouseMove(e) {
+    if (!dragState) return;
+    const svg = document.getElementById('radar-svg');
+    const pt  = getSvgPoint(svg, e.clientX, e.clientY);
+    moveDraggedMarker(dragState.id, pt.x, pt.y);
+  }
+
+  function onTouchMove(e) {
+    if (!dragState) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    const svg   = document.getElementById('radar-svg');
+    const pt    = getSvgPoint(svg, touch.clientX, touch.clientY);
+    moveDraggedMarker(dragState.id, pt.x, pt.y);
+  }
+
+  function moveDraggedMarker(id, rawX, rawY) {
+    const clamped = clampRadius(rawX, rawY);
+    const az      = xyToAz(clamped.x, clamped.y);
+    const ln      = lines.find(l => l.id === id);
+    if (!ln) return;
+    ln.azimuth = az;
+
+    // Move the SVG group by translating all positioned children
+    // Simpler: use a transform on the group. We keep the group origin at (cx,cy)
+    // so just reposition via a translate transform.
+    const g = document.getElementById(`marker-${id}`);
+    if (g) {
+      // Find the base position (first circle = either pulse or body)
+      // We use a data attribute set during renderMarkers to track original centre
+      const origX = parseFloat(g.dataset.origX || CENTER);
+      const origY = parseFloat(g.dataset.origY || CENTER);
+      const dx = clamped.x - origX;
+      const dy = clamped.y - origY;
+      g.setAttribute('transform', `translate(${dx},${dy})`);
+    }
+
+    // Update azimuth label in list
+    const azEl = document.getElementById(`az-${id}`);
+    if (azEl) azEl.textContent = formatAz(az);
+  }
+
+  function onMouseUp(e) {
+    if (!dragState) return;
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup',   onMouseUp);
+    finishDrag();
+  }
+
+  function onTouchEnd(e) {
+    if (!dragState) return;
+    document.removeEventListener('touchmove', onTouchMove);
+    document.removeEventListener('touchend',  onTouchEnd);
+    finishDrag();
+  }
+
+  function finishDrag() {
+    const { id } = dragState;
+    dragState = null;
+    const ln = lines.find(l => l.id === id);
+    if (!ln) return;
+    // Re-render markers to bake the new position cleanly (no stale transform)
+    renderMarkers();
+    sendUpdate({ id, azimuth: Math.round(ln.azimuth * 10) / 10 });
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  function resolvePort() {
+    // 1. Injected by server as a global before serving this file
+    if (typeof window.SPATIAL_PORT !== 'undefined') return window.SPATIAL_PORT;
+    // 2. ?port= query param fallback
+    const params = new URLSearchParams(window.location.search);
+    const p = parseInt(params.get('port'), 10);
+    if (p > 0) return p;
+    // 3. Default fallback
+    return 7350;
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+    wsPort = resolvePort();
+    ws = new WebSocket(`ws://localhost:${wsPort}`);
+
+    ws.addEventListener('open', () => {
+      setConnected(true);
+    });
+
+    ws.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'state' && Array.isArray(msg.lines)) {
+        lines = msg.lines;
+        renderMarkers();
+        renderLineList();
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      setConnected(false);
+      scheduleReconnect();
+    });
+
+    ws.addEventListener('error', () => {
+      ws.close();
+    });
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 2000);
+  }
+
+  function sendUpdate(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'update', ...payload }));
+  }
+
+  function setConnected(state) {
+    const statusEl = document.getElementById('ws-status');
+    const svg      = document.getElementById('radar-svg');
+    const msgEl    = document.getElementById('disconnected-msg');
+
+    if (state) {
+      statusEl.textContent = 'Connected';
+      statusEl.className   = 'connected';
+      svg.classList.remove('disconnected');
+      msgEl.classList.remove('visible');
+    } else {
+      statusEl.textContent = 'Disconnected';
+      statusEl.className   = 'disconnected';
+      svg.classList.add('disconnected');
+      msgEl.classList.add('visible');
+      msgEl.textContent = 'Disconnected — reconnecting…';
+    }
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  function formatAz(deg) {
+    const d = Math.round(deg);
+    return (d >= 0 ? '+' : '') + d + '°';
+  }
+
+  function escHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  buildRadarBG();
+  connect();
+
+})();
+</script>
+
+</body>
+</html>

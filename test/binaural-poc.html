@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Binaural PoC — VDO.Spacial.Comms</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 2rem; }
+    h1 { font-size: 1.1rem; margin-bottom: 0.25rem; }
+    p.sub { color: #888; font-size: 0.85rem; margin-bottom: 2rem; }
+    .channels { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .channel {
+      background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+      padding: 1.25rem; width: 200px;
+    }
+    .channel h2 { font-size: 0.9rem; margin-bottom: 0.75rem; color: #ccc; }
+    .channel .azimuth { font-size: 1.5rem; font-weight: bold; margin-bottom: 0.5rem; }
+    .channel .desc { font-size: 0.75rem; color: #666; margin-bottom: 1rem; }
+    button {
+      width: 100%; padding: 0.5rem; border: none; border-radius: 5px;
+      background: #2a5; color: #fff; cursor: pointer; font-size: 0.85rem;
+    }
+    button:disabled { background: #555; cursor: default; }
+    button.active { background: #a25; }
+    #start-btn {
+      margin-bottom: 2rem; padding: 0.75rem 2rem; font-size: 1rem;
+      width: auto; background: #25a;
+    }
+    .note { margin-top: 2rem; font-size: 0.8rem; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Binaural PoC — VDO.Spacial.Comms</h1>
+  <p class="sub">Phase 0: confirm HRTF PannerNode placement is audible. Wear headphones.</p>
+
+  <button id="start-btn">Start AudioContext</button>
+
+  <div class="channels" id="channels"></div>
+
+  <p class="note">
+    Each channel plays a tone at a fixed azimuth. Front/back may be subtle with generic HRTF —
+    left/right should be clear. This confirms Chromium's built-in HRTF is working on this platform
+    before wiring to live VDO lines.
+  </p>
+
+  <script>
+    const CHANNELS = [
+      { label: 'Hard Left',    azimuth: -90,  freq: 220,  desc: 'Should be clearly left' },
+      { label: 'Slight Left',  azimuth: -45,  freq: 330,  desc: 'Left-of-centre' },
+      { label: 'Front',        azimuth:   0,  freq: 440,  desc: 'Dead ahead' },
+      { label: 'Slight Right', azimuth:  45,  freq: 550,  desc: 'Right-of-centre' },
+      { label: 'Hard Right',   azimuth:  90,  freq: 660,  desc: 'Should be clearly right' },
+      { label: 'Behind',       azimuth: 180,  freq: 770,  desc: 'Front/back may be subtle' },
+    ];
+
+    let audioCtx = null;
+    const nodes = {};
+
+    document.getElementById('start-btn').addEventListener('click', async () => {
+      audioCtx = new AudioContext({ sampleRate: 48000 });
+      await audioCtx.resume();
+      document.getElementById('start-btn').disabled = true;
+      document.getElementById('start-btn').textContent = 'AudioContext running';
+      renderChannels();
+    });
+
+    function renderChannels() {
+      const container = document.getElementById('channels');
+      container.innerHTML = '';
+
+      CHANNELS.forEach(ch => {
+        const div = document.createElement('div');
+        div.className = 'channel';
+        div.innerHTML = `
+          <h2>${ch.label}</h2>
+          <div class="azimuth">${ch.azimuth}°</div>
+          <div class="desc">${ch.desc}</div>
+          <button id="btn-${ch.azimuth}">Play tone</button>
+        `;
+        container.appendChild(div);
+
+        div.querySelector('button').addEventListener('click', (e) => {
+          const key = String(ch.azimuth);
+          if (nodes[key]) {
+            nodes[key].osc.stop();
+            nodes[key].panner.disconnect();
+            delete nodes[key];
+            e.target.textContent = 'Play tone';
+            e.target.classList.remove('active');
+            return;
+          }
+
+          const panner = new PannerNode(audioCtx, {
+            panningModel: 'HRTF',
+            distanceModel: 'inverse',
+            positionX: Math.sin(ch.azimuth * Math.PI / 180),
+            positionY: 0,
+            positionZ: -Math.cos(ch.azimuth * Math.PI / 180),
+            refDistance: 1,
+            rolloffFactor: 0,
+          });
+
+          const gain = audioCtx.createGain();
+          gain.gain.value = 0.15;
+
+          const osc = audioCtx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.value = ch.freq;
+          osc.connect(gain);
+          gain.connect(panner);
+          panner.connect(audioCtx.destination);
+          osc.start();
+
+          nodes[key] = { osc, panner, gain };
+          e.target.textContent = 'Stop';
+          e.target.classList.add('active');
+        });
+      });
+    }
+  </script>
+</body>
+</html>
