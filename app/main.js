@@ -379,7 +379,7 @@ function startUnifiedAudio(cfg, withCapture) {
     const inDev = devs.find((d) => d.uid === capUid);
     const outDev = devs.find((d) => d.uid === pbUid);
     const nIn = inDev?.inChannels || 4;
-    const nOut = cfg.output_channels_override || outDev?.outChannels || 4;
+    const nOut = outDev?.outChannels || 4;
 
     coreAudio.startAudio(capUid, nIn, pbUid, nOut, captureCallbackLogged);
     const duplex = capUid && pbUid && capUid === pbUid;
