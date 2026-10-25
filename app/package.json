@@ -14,7 +14,7 @@
     "build:dir": "node scripts/bump-build.js && electron-builder --dir"
   },
   "devDependencies": {
-    "electron": "^42.3.0",
+    "electron": "^42.11.16",
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
