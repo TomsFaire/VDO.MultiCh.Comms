@@ -356,6 +356,19 @@ static AudioEngine* playbackEngine() {
   return nullptr;
 }
 
+// Engine that drains playback for an explicit session id: the session itself when
+// it owns playback, else its separate "<id>_pb" engine (capture and playback on
+// different devices). Caller must hold g_sessionsMutex.
+static AudioEngine* playbackEngineFor(const std::string& sessionId) {
+  auto it = g_sessions.find(sessionId);
+  if (it != g_sessions.end() && it->second.pbRunning)
+    return &it->second;
+  auto pb = g_sessions.find(sessionId + "_pb");
+  if (pb != g_sessions.end() && pb->second.pbRunning)
+    return &pb->second;
+  return nullptr;
+}
+
 // ── startSession / stopSession implementation ─────────────────────────────────
 
 // Forward declaration — safeStopSession is defined after startSessionImpl but
@@ -717,14 +730,8 @@ static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
   // Hold g_sessionsMutex across the lookup AND the clear operation to prevent
   // a concurrent stopSession from erasing the entry mid-use (Issue 3).
   std::lock_guard<std::mutex> lk(g_sessionsMutex);
-  AudioEngine* eng = nullptr;
-  auto it = g_sessions.find(sessionId);
-  if (it != g_sessions.end()) {
-    eng = &it->second;
-  } else {
-    // Legacy fallback
-    eng = playbackEngine();
-  }
+  AudioEngine* eng = playbackEngineFor(sessionId);
+  if (!eng) eng = playbackEngine();
   if (!eng) return env.Undefined();
   clearPlaybackChannel(*eng, ch);
   return env.Undefined();
@@ -781,9 +788,7 @@ static Napi::Value PushPlaybackSamples(const Napi::CallbackInfo& info) {
   std::lock_guard<std::mutex> lk(g_sessionsMutex);
   AudioEngine* eng = nullptr;
   if (info[0].IsString()) {
-    std::string sessionId = info[0].As<Napi::String>();
-    auto it = g_sessions.find(sessionId);
-    if (it != g_sessions.end()) eng = &it->second;
+    eng = playbackEngineFor(info[0].As<Napi::String>());
   } else {
     eng = playbackEngine();
   }
