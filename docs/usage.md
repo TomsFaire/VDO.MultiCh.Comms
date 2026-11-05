@@ -52,7 +52,9 @@ Send them two things:
 1. The **join link** (or QR code) from the share panel. Click the QR image to copy it as a PNG to the clipboard (falls back to copying the link text)
 2. The room **password**
 
-They open the link on any phone or browser, allow the microphone, and enter the password. No app or account needed. The link includes the password and TURN credentials in Internet mode, so treat it as a secret. See [security.md](security.md).
+They open the link in a browser (Chrome on Android, Safari on iPhone), allow the microphone and tap to start. The link already includes the password, and no app or account is needed. It also includes any custom TURN credentials, so treat it as a secret. See [security.md](security.md).
+
+Use a browser, not the native VDO.Ninja Android app: its "microphone only" mode sends audio but plays nothing back. Wear headphones, or the phone's mic will pick up its own speaker.
 
 A **director link** is also available to see and manage participants in vdo.ninja.
 

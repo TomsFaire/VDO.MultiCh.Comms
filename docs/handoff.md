@@ -46,9 +46,8 @@ Status values (`line-status` payload `{ status, detail, alert }`): `disconnected
 All vdo.ninja URLs (push, guest join link, director link) are built in `app/shared/urls.js`, used by main. It takes config and returns URLs:
 
 - Push: `room`, `push=<sanitised box_name>`, `label`, audio params, `password`, network params, `roomcap` if set
-- Join link: `/comms?room=...` (falls back to `/?room=...` if `/comms` misbehaves without groups)
+- Join link: plain guest page `/?room=...&push&vd=0` (+ password, network params, `roomcap` if set). It is deliberately not `/comms`: that page forces group mode, so a guest only hears peers in the group it joined, and the boxes are in no group. A plain guest hears everyone in the room and everyone hears them
 - Director link: room + password
-- Join link: no `sampleRate` and no `stunonly` (the receiver page doesn't need them; `turn=off` covers LAN)
 - Network (default `internet`): `lan` adds `turn=off` + `stunonly` on push/director URLs (and the shim strips ICE candidates); `internet` adds `&turn=<username>;<credential>;turn:<host>:<port>`
 - Auth: config `auth` section; MVP is `{ mode: 'password' }`. SSO later adds `{ mode: 'sso', universaltoken }` here only. See [security.md](security.md).
 

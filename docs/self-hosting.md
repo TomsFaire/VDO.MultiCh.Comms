@@ -35,7 +35,7 @@ cd vdo.ninja
 # Serve with nginx, Caddy, or any static host
 ```
 
-Remote guests join via `{vdo_base_url}/comms?room=<room>`. The file ships in the standard VDO.ninja repo, but your web server has to route `/comms` to it (see the nginx example).
+Remote guests join via `{vdo_base_url}/?room=<room>&push&vd=0`, the normal VDO.ninja guest page, so no special routing is needed for the app itself. The nginx example below also serves extensionless paths such as `/comms` and `/director` from their `.html` files, which matters only if you link to those pages directly.
 
 **nginx example (`/etc/nginx/sites-available/vdo`):**
 ```nginx
@@ -49,14 +49,14 @@ server {
     root /var/www/vdo.ninja;
     index index.html;
 
-    # /comms must serve comms.html, otherwise the guest join link returns 404
+    # lets /comms resolve to comms.html (not used by the app's join link)
     location / {
         try_files $uri $uri.html $uri/ /index.html;
     }
 }
 ```
 
-`$uri.html` is what makes `/comms` resolve to `comms.html`. Without it the join link 404s.
+`$uri.html` is what makes `/comms` resolve to `comms.html`.
 
 Once deployed, choose the custom instance in Settings and enter `https://live.yourdomain.com`. Until you do, the app keeps using public vdo.ninja.
 
