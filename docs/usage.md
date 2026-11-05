@@ -21,7 +21,7 @@ Either path marks the box configured. From then on it connects automatically at 
 
 Open Settings:
 
-1. **Input device** and **Output device**: your audio interface
+1. **Input device** and **Output device**: your audio interface. Leave them on **Default** to use the Mac's current system default input and output; the default is read when the app starts or when you save, so restart or re-save after changing it in System Settings. For a dedicated box, choose the interface explicitly.
 2. **Input channel** and **Output channel** (0-based) on those devices
 3. **Output gain**
 4. Save

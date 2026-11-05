@@ -38,7 +38,7 @@ WebRTC (VDO.Ninja)  <->  other boxes and remote guests
 2. Right-click, Open on first launch (ad-hoc signed, not notarized).
 3. Allow microphone access when prompted.
 4. In the wizard, either start a new session (event name, password, box name) or join an existing one (paste the session code, enter a box name).
-5. Pick input/output devices and channels in Settings. The room name can also be changed there.
+5. Optional: pick input/output devices and channels in Settings. Left on Default, the box uses the Mac's system default mic and speakers. The room name can also be changed there.
 
 Unattended installs: see [docs/deployment.md](docs/deployment.md).
 

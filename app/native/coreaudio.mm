@@ -78,6 +78,18 @@ static AudioDeviceID getDefaultOutputDeviceId() {
   return id;
 }
 
+static AudioDeviceID getDefaultInputDeviceId() {
+  AudioDeviceID id = kAudioDeviceUnknown;
+  AudioObjectPropertyAddress addr = {
+    kAudioHardwarePropertyDefaultInputDevice,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 size = sizeof(id);
+  AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &id);
+  return id;
+}
+
 static Float64 getNominalSampleRate(AudioDeviceID id) {
   Float64 rate = kSourceSampleRate;
   AudioObjectPropertyAddress addr = {
@@ -690,6 +702,13 @@ static Napi::Value ListDevices(const Napi::CallbackInfo& info) {
   return result;
 }
 
+static Napi::Value GetDefaultInputDeviceUID(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  AudioDeviceID id = getDefaultInputDeviceId();
+  if (id == kAudioDeviceUnknown) return Napi::String::New(env, "");
+  return Napi::String::New(env, getStringProperty(id, kAudioDevicePropertyDeviceUID));
+}
+
 static Napi::Value GetDefaultOutputDeviceUID(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   AudioDeviceID id = getDefaultOutputDeviceId();
@@ -844,6 +863,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("clearPlaybackChannel",      Napi::Function::New(env, ClearPlaybackChannel));
   exports.Set("playTestTone",              Napi::Function::New(env, PlayTestTone));
   exports.Set("setDefaultOutputDevice",    Napi::Function::New(env, SetDefaultOutputDevice));
+  exports.Set("getDefaultInputDeviceUID",  Napi::Function::New(env, GetDefaultInputDeviceUID));
   exports.Set("getDefaultOutputDeviceUID", Napi::Function::New(env, GetDefaultOutputDeviceUID));
   exports.Set("startSession",              Napi::Function::New(env, StartSession));
   exports.Set("stopSession",               Napi::Function::New(env, StopSession));

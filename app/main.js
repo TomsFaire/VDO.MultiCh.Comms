@@ -545,8 +545,11 @@ function findDevice(devs, uid, name, channelKey) {
 function resolveAudioDevices(cfg) {
   const devs = coreAudio.listDevices();
   const missing = [];
-  const resolve = (label, uid, name, channelKey) => {
-    if (!uid && !name) return null;
+  const resolve = (label, uid, name, channelKey, systemDefaultUid) => {
+    if (!uid && !name) {
+      uid = systemDefaultUid();
+      if (!uid) return null;
+    }
     const dev = findDevice(devs, uid, name, channelKey);
     if (!dev) {
       missing.push(`${label} "${name || uid}"`);
@@ -559,8 +562,8 @@ function resolveAudioDevices(cfg) {
     return dev;
   };
   return {
-    inDev: resolve('Input', cfg.input_device_uid, cfg.input_device_name, 'inChannels'),
-    outDev: resolve('Output', cfg.output_device_uid, cfg.output_device_name, 'outChannels'),
+    inDev: resolve('Input', cfg.input_device_uid, cfg.input_device_name, 'inChannels', coreAudio.getDefaultInputDeviceUID),
+    outDev: resolve('Output', cfg.output_device_uid, cfg.output_device_name, 'outChannels', coreAudio.getDefaultOutputDeviceUID),
     missing,
   };
 }
