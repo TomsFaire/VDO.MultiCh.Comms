@@ -1,6 +1,6 @@
 {
   "name": "vdo-multichan-comms",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Single-channel IP intercom via VDO.Ninja + CoreAudio",
   "main": "main.js",
   "scripts": {
@@ -18,6 +18,7 @@
   "build": {
     "appId": "com.vdo.multichan.comms",
     "productName": "VDO.MultiCh.Comms",
+    "afterPack": "scripts/adhoc-sign.js",
     "files": [
       "**/*",
       "!node_modules/.cache",
@@ -35,7 +36,12 @@
       "icon": "assets/icon.icns",
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ]
     },
     "dmg": {
