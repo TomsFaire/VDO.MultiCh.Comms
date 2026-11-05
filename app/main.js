@@ -1,7 +1,12 @@
-const { app, BrowserWindow, WebContentsView, webContents, ipcMain, session, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, session, shell, systemPreferences, net, powerSaveBlocker } = require('electron');
+
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) app.quit();
+
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { buildPushUrl, buildJoinUrl, buildDirectorUrl } = require('./shared/urls');
 
 const nativeAddonPath = app.isPackaged
   ? path.join(process.resourcesPath, 'coreaudio.node')
@@ -10,16 +15,22 @@ const coreAudio = require(nativeAddonPath);
 
 const CONFIG_PATH = path.join(os.homedir(), '.vdo-multichan', 'config.json');
 
-function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIceServers) {
-  const groupLiteral = JSON.stringify(String(groupName || ''));
+function buildLineShim(inputChannel, outputChannel, gainOut, stripIceServers) {
   return `
 (function() {
   const INPUT_CH = ${inputChannel};
   const OUTPUT_CH = ${outputChannel};
-  const GAIN_OUT = ${gainOut};
-  const GROUP = ${groupLiteral};
+  let GAIN_OUT = ${gainOut};
   const STRIP_ICE = ${stripIceServers ? 'true' : 'false'};
   const SAMPLE_RATE = 48000;
+  const ipc = require('electron').ipcRenderer;
+
+  window.alert = (message) => { ipc.send('line-alert', String(message)); };
+  window.confirm = (message) => { ipc.send('line-alert', String(message)); return true; };
+  window.prompt = (message) => { ipc.send('line-alert', String(message)); return null; };
+
+  setInterval(() => ipc.send('line-heartbeat'), 5000);
+  ipc.on('gain-out', (_e, gain) => { GAIN_OUT = gain; });
 
   let _resolveStream;
   const _streamPromise = new Promise(r => { _resolveStream = r; });
@@ -149,11 +160,19 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
       \`], { type: 'application/javascript' })));
       await tapCtx.resume();
 
-      let activeNodes = null;
-      let activeTrack = null;
+      const taps = new Map();
       let batchCount = 0;
       const SILENCE_PEAK = 0.002;
       const seenElements = new WeakSet();
+
+      const cap = new AudioWorkletNode(tapCtx, 'remote-cap', {
+        channelCount: 1,
+        channelCountMode: 'explicit',
+      });
+      const mute = tapCtx.createGain();
+      mute.gain.value = 0;
+      cap.connect(mute);
+      mute.connect(tapCtx.destination);
 
       function sendSamples(samples) {
         let peak = 0;
@@ -165,20 +184,22 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
         ipcRenderer.send('playback-frame', OUTPUT_CH, samples, GAIN_OUT);
         batchCount++;
         if (batchCount === 1 || batchCount % 500 === 0) {
-          console.log('[remote-tap] batch', batchCount, '→ out ch', OUTPUT_CH, 'group', GROUP, 'peak', peak.toFixed(4));
+          console.log('[remote-tap] batch', batchCount, '→ out ch', OUTPUT_CH, 'tracks', taps.size, 'peak', peak.toFixed(4));
         }
       }
 
-      function teardownActiveTap() {
-        if (!activeNodes) return;
-        try {
-          activeNodes.src.disconnect();
-          activeNodes.cap.disconnect();
-          activeNodes.mute.disconnect();
-        } catch (_) {}
-        activeNodes = null;
-        activeTrack = null;
-        ipcRenderer.send('clear-playback', OUTPUT_CH);
+      cap.port.onmessage = (e) => {
+        const data = e.data;
+        if (data && data.length) sendSamples(data);
+      };
+
+      function untapTrack(track) {
+        const src = taps.get(track);
+        if (!src) return;
+        try { src.disconnect(); } catch (_) {}
+        taps.delete(track);
+        if (taps.size === 0) ipcRenderer.send('clear-playback', OUTPUT_CH);
+        console.log('[remote-tap] detached track', track.id || track.label, 'remaining', taps.size);
       }
 
       function isLocalPreview(el) {
@@ -190,49 +211,27 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
       }
 
       function tapTrack(track) {
-        if (!track || track.kind !== 'audio' || track.readyState === 'ended') return;
-        if (activeTrack === track) return;
-        teardownActiveTap();
-        activeTrack = track;
+        if (!track || track.kind !== 'audio' || track.readyState !== 'live' || taps.has(track)) return;
         try {
           const src = tapCtx.createMediaStreamSource(new MediaStream([track]));
-          const cap = new AudioWorkletNode(tapCtx, 'remote-cap');
-          cap.port.onmessage = (e) => {
-            const data = e.data;
-            if (data && data.length) sendSamples(data);
-          };
-          const mute = tapCtx.createGain();
-          mute.gain.value = 0;
           src.connect(cap);
-          cap.connect(mute);
-          mute.connect(tapCtx.destination);
-          activeNodes = { src, cap, mute, track };
-          track.addEventListener('ended', () => {
-            if (activeTrack === track) teardownActiveTap();
-          });
-          console.log('[remote-tap] attached track', track.id || track.label, '→ out ch', OUTPUT_CH, 'group', GROUP);
+          taps.set(track, src);
+          track.addEventListener('ended', () => untapTrack(track));
+          console.log('[remote-tap] attached track', track.id || track.label, '→ out ch', OUTPUT_CH, 'tracks', taps.size);
         } catch (err) {
           console.warn('[remote-tap] failed:', err.message);
         }
       }
 
-      function tapStreamFromDom(stream) {
-        if (!stream || !stream.getAudioTracks) return;
-        for (const t of stream.getAudioTracks()) {
-          if (t.kind === 'audio' && t.readyState === 'live') {
-            tapTrack(t);
-            return;
-          }
-        }
-      }
-
       function maybeTapElement(el) {
         if (!el || !el.srcObject || isLocalPreview(el)) return;
-        if (activeTrack && activeTrack.readyState === 'live') return;
         if (el.paused && el.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-        tapStreamFromDom(el.srcObject);
+        if (el.srcObject.getAudioTracks) el.srcObject.getAudioTracks().forEach(tapTrack);
       }
 
+      // Silence vdo.ninja's own media elements so remote audio can't leak out of
+      // the system default output. The tap reads the MediaStreamTrack directly,
+      // so muting the element does not affect it.
       function silenceElement(el) {
         if (!el) return;
         el.muted = true;
@@ -260,7 +259,6 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
       document.querySelectorAll('video,audio').forEach(watchElement);
       setInterval(() => {
         document.querySelectorAll('video,audio').forEach(silenceElement);
-        if (activeTrack && activeTrack.readyState === 'live') return;
         document.querySelectorAll('video,audio').forEach(maybeTapElement);
       }, 3000);
     } catch (err) {
@@ -271,139 +269,258 @@ function buildLineShim(inputChannel, outputChannel, gainOut, groupName, stripIce
 `;
 }
 
-function sanitiseKey(str) {
-  return String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function groupFromName(name, fallbackId) {
-  const g = sanitiseKey(name);
-  return g || `pl${fallbackId + 1}`;
-}
-
 const DEFAULT_CONFIG = {
-  instance_name: 'default',
-  comms_room: 'default',
+  configured: false,
+  comms_room: '',
   comms_password: '',
-  vdo_base_url: 'https://vdo.whatadickmove.com',
-  input_device: '',
-  output_device: '',
+  vdo_base_url: 'https://vdo.ninja',
+  box_name: '',
+  location: '',
   input_device_uid: '',
+  input_device_name: '',
   output_device_uid: '',
-  sample_rate: 48000,
-  webrtc_turn_off: false,
-  webrtc_stun_only: false,
-  webrtc_lan_mode: false,
-  room_locked: false,
-  lock_password: '',
-  lines: [
-    { id: 0, name: 'PL1', group: '1', input_channel: 0, output_channel: 0, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
-    { id: 1, name: 'PL2', group: '2', input_channel: 1, output_channel: 1, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
-    { id: 2, name: 'PL3', group: '3', input_channel: 2, output_channel: 2, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
-    { id: 3, name: 'PL4', group: '4', input_channel: 3, output_channel: 3, gain_in: 1.0, gain_out: 1.0, input_device_uid: null, output_device_uid: null },
-  ],
+  output_device_name: '',
+  input_channel: 0,
+  output_channel: 0,
+  gain_out: 1.0,
+  input_channels_override: null,
+  output_channels_override: null,
+  network_mode: 'internet',
+  turn: { host: '', port: '', username: '', credential: '' },
+  roomcap: null,
+  auth: { mode: 'password' },
 };
 
-function migrateConfig(cfg) {
-  if (!cfg.comms_room) {
-    if (cfg.instance_name && cfg.instance_name !== 'default') {
-      cfg.comms_room = sanitiseKey(cfg.instance_name);
-    } else if (cfg.lines?.[0]?.room_key) {
-      const keys = cfg.lines.map((l) => l.room_key).filter(Boolean);
-      let prefix = keys[0] || 'default';
-      for (const key of keys) {
-        let i = 0;
-        while (i < prefix.length && i < key.length && prefix[i] === key[i]) i++;
-        prefix = prefix.slice(0, i);
-      }
-      cfg.comms_room = prefix || keys[0] || 'default';
-    } else {
-      cfg.comms_room = 'default';
-    }
-  }
-  if (cfg.comms_password == null) cfg.comms_password = '';
-  if (cfg.webrtc_turn_off == null)  cfg.webrtc_turn_off = false;
-  if (cfg.webrtc_stun_only == null) cfg.webrtc_stun_only = false;
-  if (cfg.webrtc_lan_mode == null)  cfg.webrtc_lan_mode = false;
-  if (cfg.room_locked == null)      cfg.room_locked = false;
-  if (cfg.lock_password == null)    cfg.lock_password = '';
-  for (const line of cfg.lines || []) {
-    if (!line.group) {
-      if (line.room_key && cfg.comms_room && line.room_key.startsWith(cfg.comms_room)) {
-        line.group = line.room_key.slice(cfg.comms_room.length) || groupFromName(line.name, line.id);
-      } else if (line.room_key) {
-        line.group = sanitiseKey(line.room_key);
-      } else {
-        line.group = groupFromName(line.name, line.id);
-      }
-    }
-    if (line.input_device_uid === undefined) line.input_device_uid = null;
-    if (line.output_device_uid === undefined) line.output_device_uid = null;
-  }
-  return cfg;
+function freshConfig() {
+  return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
 }
 
 function loadConfig() {
+  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   if (!fs.existsSync(CONFIG_PATH)) {
-    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
+    const cfg = freshConfig();
+    saveConfig(cfg);
+    return cfg;
   }
-  const cfg = migrateConfig(JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')));
-  saveConfig(cfg);
-  return cfg;
+  const parsed = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  if (Array.isArray(parsed.lines)) {
+    fs.renameSync(CONFIG_PATH, `${CONFIG_PATH}.bak`);
+    const cfg = freshConfig();
+    saveConfig(cfg);
+    return cfg;
+  }
+  const defaults = freshConfig();
+  return {
+    ...defaults,
+    ...parsed,
+    turn: { ...defaults.turn, ...parsed.turn },
+    auth: { ...defaults.auth, ...parsed.auth },
+  };
 }
 
 function saveConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 
-// Map of line id → WebContentsView for active VDO.ninja connections
-const lineViews = new Map();
-// Track connect args so lines can be reconnected if needed
-const lineConfigs = new Map(); // id → { url, channelId }
-const channelViews = new Map(); // channelId -> WebContents ID
-const sessionViews = new Map(); // lineId (number) → webContentsId — for lines with own device session
+const SHIM_PATH = path.join(app.getPath('temp'), 'shim-line.js');
+
+const BACKOFF_MIN_MS = 2000;
+const BACKOFF_MAX_MS = 60000;
+const HEARTBEAT_STALE_MS = 20000;
+const CONNECT_GRACE_MS = 30000;
+const HEALTHY_RESET_MS = 60000;
+const HEALTH_CHECK_MS = 5000;
+const DEVICE_RETRY_MS = 10000;
+const ONLINE_POLL_MS = 10000;
+
+const RESTART_KEYS = [
+  'comms_room', 'comms_password', 'vdo_base_url', 'box_name', 'location',
+  'input_device_uid', 'input_device_name', 'output_device_uid', 'output_device_name',
+  'input_channel', 'output_channel', 'input_channels_override', 'output_channels_override',
+  'network_mode', 'turn', 'roomcap', 'auth',
+];
+
+let lineView = null;
+let linePushUrl = null;
+let lineInputChannel = 0;
+let lineOutputChannel = 0;
 let mainWin = null;
-let captureActive = false;
+let isQuitting = false;
 let playbackFrameCount = 0;
 
-const capturePeaks = new Map();   // ch (0-indexed) → running peak float
-const playbackPeaks = new Map();  // ch (0-indexed) → running peak float
-const LEVEL_DECAY = 0.85;         // applied each 33ms frame; ~1s to silence
+// Live level meters: running peaks, sent to the renderer at ~30 fps and decayed
+// each frame (0.85^30 ≈ 1% after ~1s).
+let capturePeak = 0;
+let playbackPeak = 0;
+const LEVEL_DECAY = 0.85;
+const LEVEL_INTERVAL_MS = 33;
 
-// Live gain cache — keyed by channel/lineId, updated on config load/save
-const inputGainByChannel = new Map();  // input_channel → gain_in
-const outputGainByLineId = new Map();  // lineId → gain_out
+const lineState = { status: 'disconnected', detail: '', alert: '' };
+let reconnectTimer = null;
+let deviceTimer = null;
+let healthTimer = null;
+let powerBlockerId = null;
+let backoffMs = BACKOFF_MIN_MS;
+let connectedAt = 0;
+let lastHeartbeat = 0;
+let healthySince = 0;
+let authFailed = false;
 
-function updateGainCache(cfg) {
-  inputGainByChannel.clear();
-  outputGainByLineId.clear();
-  for (const line of cfg.lines || []) {
-    inputGainByChannel.set(line.input_channel, line.gain_in ?? 1.0);
-    outputGainByLineId.set(line.id, line.gain_out ?? 1.0);
+function setLineState(patch) {
+  const next = { ...lineState, ...patch };
+  if (JSON.stringify(next) === JSON.stringify(lineState)) return;
+  Object.assign(lineState, next);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('line-status', lineState);
+}
+
+function setLineStatus(status, detail = '') {
+  setLineState({ status, detail });
+}
+
+function sameLocation(a, b) {
+  const trim = (p) => p.replace(/\/$/, '');
+  return a.origin === b.origin && trim(a.pathname) === trim(b.pathname);
+}
+
+function scheduleReconnect(reason) {
+  if (reconnectTimer || !lineView) return;
+  const delay = authFailed ? BACKOFF_MAX_MS : backoffMs;
+  console.warn(`Line reconnect in ${delay}ms: ${reason}`);
+  healthySince = 0;
+  if (!authFailed) setLineStatus('reconnecting', reason);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    disconnectLine();
+    connectLine();
+  }, delay);
+  backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+}
+
+function checkLineHealth() {
+  if (!lineView || reconnectTimer || authFailed) return;
+  const now = Date.now();
+  if (now - connectedAt > CONNECT_GRACE_MS && now - lastHeartbeat > HEARTBEAT_STALE_MS) {
+    scheduleReconnect('No heartbeat from line page');
+    return;
+  }
+  if (healthySince && now - healthySince >= HEALTHY_RESET_MS) {
+    backoffMs = BACKOFF_MIN_MS;
+    setLineState({ alert: '' });
   }
 }
 
-function captureCallback(ch, samples) {
-  const wcId = channelViews.get(ch);
-  if (wcId == null) return;
-  const gain = inputGainByChannel.get(ch) ?? 1.0;
-  let toSend = samples;
-  let p = 0;
-  if (gain !== 1.0) {
-    toSend = new Float32Array(samples.length);
-    for (let i = 0; i < samples.length; i++) {
-      toSend[i] = samples[i] * gain;
-      const a = Math.abs(toSend[i]);
-      if (a > p) p = a;
+function onLineNavigated(view, url) {
+  if (lineView !== view || !linePushUrl) return;
+  let target;
+  try { target = new URL(url); } catch { return; }
+  if (sameLocation(target, new URL(linePushUrl))) {
+    if (authFailed) {
+      authFailed = false;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      setLineStatus('connecting');
     }
-  } else {
-    for (let i = 0; i < samples.length; i++) { const a = Math.abs(samples[i]); if (a > p) p = a; }
+    return;
   }
-  capturePeaks.set(ch, Math.max(capturePeaks.get(ch) || 0, p));
-  const wc = webContents.fromId(wcId);
-  if (wc && !wc.isDestroyed()) {
-    wc.send('audio-frame', ch, toSend);
+  authFailed = true;
+  console.warn(`Line navigated away from push URL: ${target.origin}${target.pathname}`);
+  setLineStatus('auth-failed', `Redirected to ${target.host}`);
+  scheduleReconnect('auth');
+}
+
+function createLineView(preloadPath, url) {
+  const lineSes = session.fromPartition('persist:line');
+  lineSes.setPreloads([preloadPath]);
+  lineSes.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media' || permission === 'microphone');
+  });
+  lineSes.setPermissionCheckHandler((_wc, permission) => {
+    return permission === 'media' || permission === 'microphone';
+  });
+
+  const view = new WebContentsView({
+    webPreferences: {
+      session: lineSes,
+      contextIsolation: false,
+      nodeIntegration: false,
+      sandbox: false,
+      autoplayPolicy: 'no-user-gesture-required',
+      backgroundThrottling: false,
+    },
+  });
+
+  const wc = view.webContents;
+  wc.setAudioMuted(true);
+  wc.on('did-fail-load', (_e, errorCode, desc, _url, isMainFrame) => {
+    if (lineView === view && isMainFrame && errorCode !== -3) scheduleReconnect(`Load failed: ${desc}`);
+  });
+  wc.on('render-process-gone', (_e, details) => {
+    if (lineView === view) scheduleReconnect(`Line page crashed: ${details.reason}`);
+  });
+  wc.on('unresponsive', () => {
+    if (lineView === view) scheduleReconnect('Line page unresponsive');
+  });
+  wc.on('did-navigate', (_e, navUrl) => onLineNavigated(view, navUrl));
+  mainWin.contentView.addChildView(view);
+  view.setBounds({ x: -400, y: -400, width: 320, height: 240 });
+  wc.loadURL(url);
+  return view;
+}
+
+function connectLine() {
+  if (lineView) return;
+  const cfg = loadConfig();
+  if (!cfg.configured || !cfg.comms_room || !cfg.box_name) return;
+
+  lineInputChannel = cfg.input_channel;
+  lineOutputChannel = cfg.output_channel;
+  const stripIce = cfg.network_mode === 'lan';
+  fs.writeFileSync(SHIM_PATH, buildLineShim(cfg.input_channel, cfg.output_channel, cfg.gain_out, stripIce));
+
+  authFailed = false;
+  connectedAt = Date.now();
+  lastHeartbeat = 0;
+  healthySince = 0;
+  setLineStatus('connecting');
+  linePushUrl = buildPushUrl(cfg);
+  lineView = createLineView(SHIM_PATH, linePushUrl);
+  powerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  healthTimer = setInterval(checkLineHealth, HEALTH_CHECK_MS);
+  console.log(`Line in ch${cfg.input_channel} → out ch${cfg.output_channel} lan=${stripIce}`);
+  console.log(`  url: ${linePushUrl}`);
+}
+
+function disconnectLine() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  clearInterval(healthTimer);
+  healthTimer = null;
+  if (powerBlockerId !== null) {
+    powerSaveBlocker.stop(powerBlockerId);
+    powerBlockerId = null;
   }
+  if (!lineView) return;
+  const view = lineView;
+  lineView = null;
+  linePushUrl = null;
+  if (mainWin && !mainWin.isDestroyed()) mainWin.contentView.removeChildView(view);
+  view.webContents.close();
+  try { fs.unlinkSync(SHIM_PATH); } catch (_) {}
+  try { coreAudio.clearPlaybackChannel(lineOutputChannel, 'default'); } catch (_) {}
+  console.log('Line disconnected');
+}
+
+function captureCallback(ch, samples) {
+  if (ch !== lineInputChannel) return;
+  let p = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const a = Math.abs(samples[i]);
+    if (a > p) p = a;
+  }
+  if (p > capturePeak) capturePeak = p;
+  if (!lineView) return;
+  const wc = lineView.webContents;
+  if (!wc.isDestroyed()) wc.send('audio-frame', ch, samples);
 }
 
 let captureFrameCount = 0;
@@ -416,36 +533,151 @@ function captureCallbackLogged(ch, samples) {
   }
 }
 
-function startUnifiedAudio(cfg, withCapture) {
+function findDevice(devs, uid, name, channelKey) {
+  const pool = devs.filter((d) => d[channelKey] > 0);
+  const byUid = uid && pool.find((d) => d.uid === uid);
+  if (byUid) return byUid;
+  if (!name) return null;
+  const lower = name.toLowerCase();
+  return pool.find((d) => d.name === name) || pool.find((d) => d.name.toLowerCase().includes(lower)) || null;
+}
+
+function resolveAudioDevices(cfg) {
+  const devs = coreAudio.listDevices();
+  const missing = [];
+  const resolve = (label, uid, name, channelKey, systemDefaultUid) => {
+    if (!uid && !name) {
+      uid = systemDefaultUid();
+      if (!uid) return null;
+    }
+    const dev = findDevice(devs, uid, name, channelKey);
+    if (!dev) {
+      missing.push(`${label} "${name || uid}"`);
+      console.error(`${label} device not found (uid=${uid || '-'} name=${name || '-'})`);
+      return null;
+    }
+    if (dev.uid !== uid) {
+      console.warn(`${label} device UID changed; matched by name "${dev.name}" (${uid || '-'} → ${dev.uid})`);
+    }
+    return dev;
+  };
+  return {
+    inDev: resolve('Input', cfg.input_device_uid, cfg.input_device_name, 'inChannels', coreAudio.getDefaultInputDeviceUID),
+    outDev: resolve('Output', cfg.output_device_uid, cfg.output_device_name, 'outChannels', coreAudio.getDefaultOutputDeviceUID),
+    missing,
+  };
+}
+
+function startAudio(cfg) {
   if (process.platform !== 'darwin') return { ok: true };
   try {
-    const devs = coreAudio.listDevices();
-    const capUid = withCapture ? (cfg.input_device_uid || '') : '';
-    const pbUid = cfg.output_device_uid || '';
-    const inDev = devs.find((d) => d.uid === capUid);
-    const outDev = devs.find((d) => d.uid === pbUid);
+    const { inDev, outDev, missing } = resolveAudioDevices(cfg);
+    if (missing.length) return { ok: false, missing };
+    const capUid = inDev?.uid || '';
+    const pbUid = outDev?.uid || '';
     const nIn = inDev?.inChannels || 4;
     const nOut = cfg.output_channels_override || outDev?.outChannels || 4;
 
     coreAudio.startAudio(capUid, nIn, pbUid, nOut, captureCallbackLogged);
     const duplex = capUid && pbUid && capUid === pbUid;
     console.log(`Audio started: cap=${capUid || 'off'} pb=${pbUid || 'off'} duplex=${duplex} (device @ 48 kHz expected)`);
-    return { ok: true, duplex };
+    return { ok: true };
   } catch (e) {
     console.error('Audio start failed:', e.message);
     return { ok: false, error: e.message };
   }
 }
 
-function applyAudioFromConfig(cfg) {
-  startUnifiedAudio(cfg, captureActive);
+function startLine() {
+  clearTimeout(deviceTimer);
+  deviceTimer = null;
+  const cfg = loadConfig();
+  if (!cfg.configured) {
+    setLineStatus('disconnected');
+    return;
+  }
+  lineInputChannel = cfg.input_channel;
+  lineOutputChannel = cfg.output_channel;
+  const audio = startAudio(cfg);
+  if (!audio.ok) {
+    const detail = audio.missing
+      ? `Audio device not found: ${audio.missing.join(', ')}`
+      : `Audio start failed: ${audio.error}`;
+    setLineStatus('device-missing', detail);
+    deviceTimer = setTimeout(startLine, DEVICE_RETRY_MS);
+    return;
+  }
+  connectLine();
 }
 
-// Capture first-run state before loadConfig() creates the file
-const FIRST_RUN = !fs.existsSync(CONFIG_PATH);
+function restartLine() {
+  disconnectLine();
+  backoffMs = BACKOFF_MIN_MS;
+  startLine();
+}
 
-app.whenReady().then(() => {
-  // Grant mic + camera permission for all web contents (renderer + VDO.ninja views)
+function showMainWindow() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+}
+
+function createMainWindow(title, show) {
+  mainWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    show,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      backgroundThrottling: false,
+    },
+    title,
+  });
+  mainWin.on('close', (e) => {
+    if (isQuitting) return;
+    e.preventDefault();
+    mainWin.hide();
+  });
+  mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+}
+
+function startLevelMeters() {
+  setInterval(() => {
+    const levels = { capture: capturePeak, playback: playbackPeak };
+    capturePeak *= LEVEL_DECAY;
+    playbackPeak *= LEVEL_DECAY;
+    if (mainWin && !mainWin.isDestroyed() && mainWin.isVisible()) {
+      mainWin.webContents.send('audio-levels', levels);
+    }
+  }, LEVEL_INTERVAL_MS);
+}
+
+function watchNetworkAndPower() {
+  const { powerMonitor } = require('electron');
+  powerMonitor.on('resume', () => scheduleReconnect('System resumed from sleep'));
+  let wasOnline = net.isOnline();
+  setInterval(() => {
+    const online = net.isOnline();
+    if (online && !wasOnline) scheduleReconnect('Network back online');
+    wasOnline = online;
+  }, ONLINE_POLL_MS);
+}
+
+function needsRestart(prev, next) {
+  return RESTART_KEYS.some((k) => JSON.stringify(prev[k]) !== JSON.stringify(next[k]));
+}
+
+app.on('second-instance', showMainWindow);
+app.on('activate', showMainWindow);
+app.on('before-quit', () => { isQuitting = true; });
+
+if (hasInstanceLock) app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(permission === 'media' || permission === 'microphone' || permission === 'camera');
   });
@@ -453,8 +685,7 @@ app.whenReady().then(() => {
     return permission === 'media' || permission === 'microphone' || permission === 'camera';
   });
 
-  // FIRST_RUN was captured at module load, before loadConfig() created the file
-  ipcMain.handle('is-first-run', () => FIRST_RUN);
+  ipcMain.handle('is-first-run', () => !loadConfig().configured);
 
   const buildMeta = (() => {
     try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'build-meta.json'), 'utf8')); }
@@ -464,206 +695,48 @@ app.whenReady().then(() => {
 
   const windowTitle = `VDO.MultiCh.Comms v${buildMeta.version} build ${buildMeta.build}`;
 
-  // Request macOS TCC microphone permission — without this getUserMedia returns
-  // a muted track on macOS even when Electron's own permission handler says yes.
   if (process.platform === 'darwin') {
     systemPreferences.askForMediaAccess('microphone').then(granted => {
       console.log('Microphone TCC permission:', granted ? 'granted' : 'denied');
     });
   }
 
-  const cfg = loadConfig();
-  updateGainCache(cfg);
-  applyAudioFromConfig(cfg);
+  createMainWindow(windowTitle, !loadConfig().configured);
 
-  mainWin = new BrowserWindow({
-    width: 1500,
-    height: 950,
-    minWidth: 1200,
-    minHeight: 800,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-    },
-    title: windowTitle,
+  ipcMain.handle('reconnect-line', () => {
+    restartLine();
+    return lineState;
+  });
+  ipcMain.handle('get-line-status', () => lineState);
+  ipcMain.on('line-heartbeat', (e) => {
+    if (!lineView || e.sender !== lineView.webContents || authFailed || reconnectTimer) return;
+    lastHeartbeat = Date.now();
+    if (!healthySince) healthySince = lastHeartbeat;
+    setLineStatus('connected');
+  });
+  ipcMain.on('line-alert', (e, message) => {
+    if (!lineView || e.sender !== lineView.webContents) return;
+    console.warn(`Line page alert: ${message}`);
+    setLineState({ alert: String(message) });
+    scheduleReconnect(`Line page alert: ${message}`);
+  });
+  ipcMain.handle('get-links', () => {
+    const current = loadConfig();
+    if (!current.comms_room) return { join: '', director: '' };
+    return { join: buildJoinUrl(current), director: buildDirectorUrl(current) };
   });
 
-  mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-
-  setInterval(() => {
-    if (!mainWin || mainWin.isDestroyed()) return;
-    const capture = {}, playback = {};
-    for (const [ch, p] of capturePeaks) { capture[ch] = p; capturePeaks.set(ch, p * LEVEL_DECAY); }
-    for (const [ch, p] of playbackPeaks) { playback[ch] = p; playbackPeaks.set(ch, p * LEVEL_DECAY); }
-    mainWin.webContents.send('audio-levels', { capture, playback });
-  }, 33);
-
-  // Open all target="_blank" links (director pages, join links) in the system browser
-  mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  // One hidden WebContentsView per line (push + group-scoped listen in a single session).
-  function createLineView(partition, preloadPath, url) {
-    const lineSes = session.fromPartition(partition);
-    lineSes.setPreloads([preloadPath]);
-    lineSes.setPermissionRequestHandler((_wc, permission, callback) => {
-      callback(permission === 'media' || permission === 'microphone');
-    });
-    lineSes.setPermissionCheckHandler((_wc, permission) => {
-      return permission === 'media' || permission === 'microphone';
-    });
-
-    const view = new WebContentsView({
-      webPreferences: {
-        session: lineSes,
-        contextIsolation: false,
-        nodeIntegration: false,
-        sandbox: false,
-        autoplayPolicy: 'no-user-gesture-required',
-      },
-    });
-
-    view.webContents.setAudioMuted(true);
-    mainWin.contentView.addChildView(view);
-    view.setBounds({ x: -400, y: -400, width: 320, height: 240 });
-    view.webContents.loadURL(url);
-    return view;
-  }
-
-  ipcMain.handle('connect-line', (_, { id, url, inputChannel, outputChannel, gainOut, group }) => {
-    if (lineViews.has(id)) return;
-
-    const cfg = loadConfig();
-    const stripIce = cfg.webrtc_lan_mode !== false;
-    const line = cfg.lines.find(l => l.id === id);
-    const hasOwnDevices = !!(line?.input_device_uid && line?.output_device_uid);
-    // Per-session is for dedicated per-PL interfaces. If the per-PL device is the
-    // same as the global device, the shared session already handles all channels
-    // correctly via channelViews — starting a redundant per-session would only ever
-    // capture ch0 regardless of line.input_channel, causing married meters.
-    const isGlobalDevice = hasOwnDevices
-      && line.input_device_uid === (cfg.input_device_uid || '')
-      && line.output_device_uid === (cfg.output_device_uid || '');
-    const shouldUsePerSession = hasOwnDevices && !isGlobalDevice;
-
-    const tempDir = app.getPath('temp');
-    const preloadPath = path.join(tempDir, `shim-line-${id}.js`);
-    fs.writeFileSync(
-      preloadPath,
-      buildLineShim(inputChannel ?? 0, outputChannel ?? 0, gainOut ?? 1.0, group ?? '', stripIce)
-    );
-
-    const view = createLineView(`persist:line-${id}`, preloadPath, url);
-
-    lineViews.set(id, view);
-
-    let actuallyHasOwnSession = false;
-    console.log(`connect-line PL${id}: hasOwnDevices=${hasOwnDevices} isGlobalDevice=${isGlobalDevice} shouldUsePerSession=${shouldUsePerSession} in_uid=${line?.input_device_uid || 'none'} input_ch=${line?.input_channel}`);
-    if (shouldUsePerSession) {
-      const sessionId = `pl-${id}`;
-      try {
-        coreAudio.startSession(
-          sessionId,
-          line.input_device_uid, 1,
-          line.output_device_uid, 1,
-          (ch, samples) => {
-            let p = 0;
-            for (let i = 0; i < samples.length; i++) { const a = Math.abs(samples[i]); if (a > p) p = a; }
-            capturePeaks.set(line.input_channel, Math.max(capturePeaks.get(line.input_channel) || 0, p));
-            const wcId = sessionViews.get(id);
-            if (wcId == null) return;
-            const wc = webContents.fromId(wcId);
-            if (wc && !wc.isDestroyed()) wc.send('audio-frame', line.input_channel, samples);
-          }
-        );
-        actuallyHasOwnSession = true;
-        sessionViews.set(id, view.webContents.id);
-        console.log(`Line ${id} own-session pl-${id} cap=${line.input_device_uid} pb=${line.output_device_uid} → out ch${outputChannel} group=${group} lan=${stripIce}`);
-      } catch (e) {
-        console.error(`startSession failed for PL ${id}:`, e.message);
-        // Fall through to shared session path
-        channelViews.set(inputChannel ?? 0, view.webContents.id);
-        console.log(`Line ${id} fell back to shared-session in ch${inputChannel} → out ch${outputChannel} group=${group} lan=${stripIce}`);
-      }
-    } else {
-      // Shared session: handles global device + same-as-global per-PL assignments
-      channelViews.set(inputChannel ?? 0, view.webContents.id);
-      console.log(`Line ${id} shared-session ch${inputChannel} → out ch${outputChannel} group=${group} lan=${stripIce}`);
-    }
-
-    // For separate in/out devices, startSessionImpl creates "pl-N_pb" for playback.
-    // For same device (duplex), "pl-N" handles both. Use the right ID when pushing.
-    const playbackSessionId = (actuallyHasOwnSession && line.input_device_uid !== line.output_device_uid)
-      ? `pl-${id}_pb`
-      : `pl-${id}`;
-
-    lineConfigs.set(id, {
-      url,
-      inputChannel: inputChannel ?? 0,
-      outputChannel: outputChannel ?? 0,
-      gainOut: gainOut ?? 1.0,
-      group: group ?? '',
-      hasOwnSession: actuallyHasOwnSession,
-      playbackSessionId,
-    });
-    console.log(`  url: ${url}`);
-  });
-
-  ipcMain.handle('disconnect-line', (_, id) => {
-    const view = lineViews.get(id);
-    if (!view) return;
-    mainWin.contentView.removeChildView(view);
-    view.webContents.close();
-    const lineCfg = lineConfigs.get(id);
-    if (lineCfg?.hasOwnSession) {
-      try { coreAudio.stopSession(`pl-${id}`); } catch (_) {}
-      sessionViews.delete(id);
-    } else {
-      for (const [ch, wcId] of channelViews) {
-        if (wcId === view.webContents.id) channelViews.delete(ch);
-      }
-    }
-    const tempDir = app.getPath('temp');
-    try { fs.unlinkSync(path.join(tempDir, `shim-line-${id}.js`)); } catch (_) {}
-    if (lineCfg?.outputChannel != null) {
-      try { coreAudio.clearPlaybackChannel(lineCfg.outputChannel); } catch (_) {}
-    }
-    lineViews.delete(id);
-    lineConfigs.delete(id);
-    console.log(`Line ${id} disconnected`);
-  });
-
-  // CoreAudio IPC handlers
   ipcMain.handle('list-audio-devices', () => coreAudio.listDevices());
-
-  ipcMain.handle('start-audio-capture', (_e, deviceUID, nChannels) => {
-    try {
-      captureActive = true;
-      const cfg = loadConfig();
-      if (deviceUID) cfg.input_device_uid = deviceUID;
-      return startUnifiedAudio(cfg, true);
-    } catch (e) {
-      console.error('Capture failed:', e.message);
-      return { ok: false, error: e.message };
-    }
-  });
-
-  ipcMain.handle('stop-audio-capture', () => {
-    captureActive = false;
-    return startUnifiedAudio(loadConfig(), false);
-  });
 
   ipcMain.on('clear-playback', (_e, outCh) => {
     try {
-      coreAudio.clearPlaybackChannel(outCh ?? 0);
+      coreAudio.clearPlaybackChannel(outCh ?? 0, 'default');
     } catch (err) {
       console.error('clear-playback error:', err.message);
     }
   });
 
-  ipcMain.on('playback-frame', (event, outCh, samples, gain) => {
+  ipcMain.on('playback-frame', (_e, outCh, samples, gain) => {
     try {
       let floats = samples;
       if (Buffer.isBuffer(samples)) {
@@ -680,31 +753,11 @@ app.whenReady().then(() => {
         if (a > peak) peak = a;
       }
       if (peak < 0.002) return;
-      playbackPeaks.set(outCh, Math.max(playbackPeaks.get(outCh) || 0, peak));
-
-      // Route to per-PL session if the sending view has its own session
-      let usedOwnSession = false;
-      let foundLineId = null;
-      for (const [lineId, view] of lineViews) {
-        if (view.webContents.id === event.sender.id) {
-          foundLineId = lineId;
-          const lc = lineConfigs.get(lineId);
-          if (lc?.hasOwnSession) {
-            const liveGain = outputGainByLineId.get(lineId) ?? 1.0;
-            coreAudio.pushPlaybackSamples(lc.playbackSessionId ?? `pl-${lineId}`, 0, floats, liveGain);
-            usedOwnSession = true;
-          }
-          break;
-        }
-      }
-      if (!usedOwnSession) {
-        const liveGain = (foundLineId != null ? outputGainByLineId.get(foundLineId) : null) ?? 1.0;
-        coreAudio.pushPlaybackSamples('default', outCh, floats, liveGain);
-      }
-
+      if (peak > playbackPeak) playbackPeak = peak;
+      coreAudio.pushPlaybackSamples('default', outCh, floats, gain ?? 1.0);
       playbackFrameCount++;
       if (playbackFrameCount === 1 || playbackFrameCount % 500 === 0) {
-        console.log(`playback-frame batch #${playbackFrameCount} → ${usedOwnSession ? `session pl-${[...lineViews.keys()].find(id => lineViews.get(id).webContents.id === event.sender.id)}` : `out ch ${outCh}`} (${floats.length} samples, peak=${peak.toFixed(4)})`);
+        console.log(`playback-frame batch #${playbackFrameCount} → out ch ${outCh} (${floats.length} samples, peak=${peak.toFixed(4)})`);
       }
     } catch (err) {
       console.error('playback-frame error:', err.message);
@@ -720,23 +773,23 @@ app.whenReady().then(() => {
     }
   });
 
-  // IPC handlers
   ipcMain.handle('generate-qr', async (_, text) => {
     const QRCode = require('qrcode');
     return QRCode.toDataURL(text, { width: 120, margin: 1 });
   });
   ipcMain.handle('get-config', () => loadConfig());
   ipcMain.handle('save-config', (_, cfg) => {
+    const prev = loadConfig();
     saveConfig(cfg);
-    updateGainCache(cfg);
+    if (cfg.configured && (!prev.configured || needsRestart(prev, cfg))) {
+      restartLine();
+    } else if (lineView && prev.gain_out !== cfg.gain_out) {
+      lineView.webContents.send('gain-out', cfg.gain_out);
+    }
     return true;
-  });
-  ipcMain.handle('restart-playback', () => {
-    return startUnifiedAudio(loadConfig(), captureActive);
   });
   ipcMain.handle('test-vdo-url', async (_, url) => {
     try {
-      const { net } = require('electron');
       const req = net.request(url);
       return await new Promise((resolve) => {
         req.on('response', (res) => resolve({ ok: res.statusCode < 400, status: res.statusCode }));
@@ -747,18 +800,13 @@ app.whenReady().then(() => {
       return { ok: false, error: String(e) };
     }
   });
+
+  startLevelMeters();
+  watchNetworkAndPower();
+  startLine();
 });
 
 app.on('will-quit', () => {
-  // Stop all per-line sessions before the default session
-  for (const [lineId, lc] of lineConfigs) {
-    if (lc.hasOwnSession) {
-      try { coreAudio.stopSession(`pl-${lineId}`); } catch (_) {}
-    }
-  }
+  disconnectLine();
   try { coreAudio.stopAudio(); } catch (_) {}
-});
-
-app.on('window-all-closed', () => {
-  app.quit();
 });

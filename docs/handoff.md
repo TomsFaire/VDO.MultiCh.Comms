@@ -1,190 +1,100 @@
-# Development Handoff — VDO.MultiCh.Comms
+# Handoff
 
-**Date:** 2026-06-16
-**Current version:** 0.1.4 (see `app/build-meta.json` for build number)
-**Branch:** `feature/audio-bifurcation`
+Current architecture for the single-channel intercom. If something here disagrees with the code, the code wins; fix this file.
 
----
-
-## What this project is
-
-A macOS Electron app for multi-channel IP intercom. Primary use case: bridging two buildings with hardware intercom systems and multiple party lines over WAN (IP replacement for ISDN/analogue intercom trunks). Also works on LAN.
-
-Connects up to four **party lines** to a **single VDO.ninja Comms room**, with each line as a **group** inside that room. Broadcast crew route hardware audio channels independently; mobile users join one Comms link.
-
-**Architecture:**
+## Architecture
 
 ```
-Hardware mic / audio interface (CoreAudio)
-  → coreaudio.node N-API addon (main process)
-  → captureCallback → webContents.send('audio-frame', ch, samples)
-  → Per-line preload (AudioWorklet getUserMedia override)
-  → VDO.ninja push (group-scoped, room=comms_room)
-  → WebRTC → remote participants
-
-Remote audio (inbound)
-  → Same WebContentsView (group-scoped listen)
-  → DOM remote-tap + AudioWorklet (media elements muted)
-  → ipcRenderer.send('playback-frame', outCh, samples, gain)
-  → coreAudio.pushPlaybackSamples(sessionId, ch, data, gain)
-  → hardware output channel
+Electron main (app/main.js)
+  - loads config, single-instance lock, boot sequence
+  - loads coreaudio.node: enumerate devices, capture input, play output
+  - owns ONE line view (hidden WebContentsView -> vdo.ninja URL)
+  - connectLine() / disconnectLine(), watchdog, powerSaveBlocker
+  - builds all vdo.ninja URLs via the shared URL module
+Preload shim (injected into the line view)
+  - getUserMedia -> hardware input channel (AudioWorklet fed from main)
+  - taps EVERY remote audio track into one remote-cap worklet (summed), sent to the hardware output channel
+  - sends line-heartbeat IPC every 5s
+Renderer (app/renderer/) - settings and a single status card
 ```
 
-The **Rust shim** (`shim/`, CPAL, WebSocket :9696) was **deleted** in v0.1.1. Do not resurrect it.
+## Boot sequence
 
----
+`whenReady` -> `requestSingleInstanceLock()` -> load config.
 
-## Repo layout
+- `configured: true`: window stays hidden (`show: false`), `startLine()` starts audio with capture in main, then `connectLine()`.
+- Otherwise: show window, run the wizard. Only a completed wizard or a session import sets `configured: true`. An abandoned wizard never auto-joins.
+- `save-config` calls `restartLine()` when the config becomes configured or any device, channel, network, room, password, box name, location or roomcap value changes. A `gain_out`-only change is pushed live to the shim (`gain-out`) without reconnecting. The renderer never starts capture.
+- Closing the window hides it; `before-quit` sets `isQuitting` so Cmd-Q really quits. `activate` and `second-instance` show the window.
 
-```
-app/
-  main.js              Main process — CoreAudio, IPC, WebContentsView, line preloads
-  preload.js           Renderer preload — IPC bridge
-  build-meta.json      { "version", "build" } — bumped by scripts/bump-build.js
-  package.json         electron-builder; extraResources ships coreaudio.node
-  renderer/
-    app.js             UI — comms bar, groups, line connect, settings, meters
-    index.html         UI shell + styles
-  native/
-    coreaudio.mm       CoreAudio capture/playback N-API addon
-    binding.gyp
-    package.json       node-gyp build scripts
-  scripts/
-    bump-build.js      Auto-increment build before dist
+Windows and the line view use `backgroundThrottling: false`; `powerSaveBlocker('prevent-app-suspension')` is held while connected.
 
-docs/
-  usage.md             End-user guide
-  development.md       Build from source, architecture
-  handoff.md           This file
-  known-issues.md      Status and open bugs
-  self-hosting.md      VDO.ninja / TURN / signaling
-  screenshot-v0.1.3.png  UI screenshot (v0.1.3)
-```
+## Device resolution
 
----
+One helper in main (`findDevice` / `resolveAudioDevices`) matches input/output by UID, then by exact name, then case-insensitive substring. If a configured device matches neither, status is `device-missing` and `startLine()` retries every 10s (late-enumerating USB interfaces) until audio starts, then connects. Name-fallback matches and misses are logged. The renderer's device lookup uses the same UID-then-name order. An input or output with no UID and no name means no capture/playback on that side.
 
-## How to build
+## Watchdog
 
-### Native addon (required before run or dist)
+Watches the line view's `webContents`: main-frame `did-fail-load`, `render-process-gone`, `unresponsive`, a stale `line-heartbeat` (over 20s, checked after a 30s grace from connect), a `line-alert`, `powerMonitor` `resume`, and an offline to online change of `net.isOnline()` (polled every 10s). Any trigger schedules one reconnect (`disconnectLine()` then `connectLine()`) with exponential backoff from 2s to 60s; there is never more than one pending timer. Backoff resets after the line has been healthy for 60s. It never uses peer count (zero peers is normal).
 
-```bash
-cd app/native
-npm install
-npm run build
-# → app/native/build/Release/coreaudio.node
-```
+The shim overrides `alert`/`confirm`/`prompt` to be non-blocking and forwards the text over `line-alert` (a blocking dialog would freeze the hidden view). vdo.ninja alerts, such as "stream ID in use" after a power cycle, therefore cause a retry. A `did-navigate` away from the push URL's origin and path (e.g. a login page) sets `auth-failed` and reconnects at the maximum backoff.
 
-### Dev run
+Status values (`line-status` payload `{ status, detail, alert }`): `disconnected` (not configured), `connecting` (until first heartbeat), `connected`, `reconnecting` (during backoff; `detail` is the reason), `device-missing` (also used when audio fails to start; `detail` explains; retried every 10s), `auth-failed`.
 
-```bash
-cd app
-npm install
-npm start
-```
+## Shared URL module
 
-### DMG (auto-bumps build number)
+All vdo.ninja URLs (push, guest join link, director link) are built in `app/shared/urls.js`, used by main. It takes config and returns URLs:
 
-```bash
-cd app/native && npm run build
-cd .. && npm run build
-# → app/dist/VDO.MultiCh.Comms-<version>-arm64.dmg
-```
+- Push: `room`, `push=<sanitised box_name>`, `label`, audio params, `password`, network params, `roomcap` if set
+- Join link: plain guest page `/?room=...&push&vd=0` (+ password, network params, `roomcap` if set). It is deliberately not `/comms`: that page forces group mode, so a guest only hears peers in the group it joined, and the boxes are in no group. A plain guest hears everyone in the room and everyone hears them
+- Director link: room + password
+- Network (default `internet`): `lan` adds `turn=off` + `stunonly` on push/director URLs (and the shim strips ICE candidates); `internet` adds `&turn=<username>;<credential>;turn:<host>:<port>`
+- Auth: config `auth` section; MVP is `{ mode: 'password' }`. SSO later adds `{ mode: 'sso', universaltoken }` here only. See [security.md](security.md).
 
-### CI
+## Config schema (`~/.vdo-multichan/config.json`)
 
-`.github/workflows/release.yml` — builds native addon, `npm run build`, ad-hoc signs DMG, publishes on `v*.*.*` tags.
+| Key | Notes |
+|---|---|
+| `configured` | true only after wizard/import |
+| `comms_room`, `comms_password`, `vdo_base_url` | shared by all boxes |
+| `box_name` | unique per box; becomes the push ID |
+| `location` | display only |
+| `input_device_uid` / `input_device_name`, `output_device_uid` / `output_device_name` | resolved UID then name |
+| `input_channel`, `output_channel`, `gain_out`, channel overrides | |
+| `network_mode` | `internet` (default) or `lan` |
+| `turn` | `{ host, port, username, credential }`, used in internet mode |
+| `roomcap` | `null` = no limit (no param sent) |
 
----
+Removed: `lines[]`, `group`, `gain_in`, `instance_name`, `webrtc_*` flags. A config containing `lines` (old schema) is renamed to `config.json.bak` and the app starts unconfigured.
 
-## Config model
+## Session code
 
-Path: `~/.vdo-multichan/config.json`
+Base64 of `{ v: 3, comms_room, comms_password, vdo_base_url, network_mode, turn }`. No box name or devices, so every box gets identical network settings. Non-v3 codes are rejected.
 
-| Field | Purpose |
-|-------|---------|
-| `comms_room` | Single VDO.ninja room for all lines + mobile Comms |
-| `comms_password` | Optional room password (appended to all URLs) |
-| `input_device_uid` / `output_device_uid` | Global CoreAudio device UIDs |
-| `webrtc_lan_mode` | `true` = strip ICE servers in preloads + `stunonly=1` on URLs. Default `false` (WAN) |
-| `webrtc_turn_off` / `webrtc_stun_only` | Additional URL params for WebRTC behavior |
-| `lines[].group` | Party-line identity inside the room (from line name) |
-| `lines[].input_channel` / `output_channel` | Hardware channel index (0-based) |
-| `lines[].input_device_uid` / `output_device_uid` | Per-PL dedicated device UID; `null` falls back to global |
-| `lines[].gain_in` / `gain_out` | Capture and playback gain multiplier (0–10×) |
+## IPC (renderer <-> main)
 
-**Migration:** legacy per-line `room_key` configs are upgraded in `migrateConfig()` to `comms_room` + `group`. `webrtc_*` fields use null-guard defaults so they are never forcibly overwritten.
+Level meters: main keeps a running peak of capture frames for the input channel and of playback frames pushed to the output channel, decays both by 0.85 every 33 ms, and sends `audio-levels` `{ capture, playback }` (0 to 1) to the renderer while the window is visible. The renderer scales by 200% and colours green/blue, yellow at 60%, red at 95%.
 
-**Session export:** v2 base64 JSON `{ v: 2, comms_room, comms_password, lines: [{ id, name, group }] }`.
+Audio bleed: the line shim mutes and zeroes the volume of every vdo.ninja `<video>`/`<audio>` element on discovery, on each `playing` event, and every 3 s, so remote audio can't leak out of the system default output. The remote tap reads each `MediaStreamTrack` directly, so it keeps working.
 
----
+Playback goes to the native addon's `default` session explicitly: `pushPlaybackSamples('default', ch, floats, gain)` and `clearPlaybackChannel(ch, 'default')`.
 
-## VDO.ninja URL builders (`renderer/app.js`)
+Renderer to main: `get-line-status`, `reconnect-line` (restarts audio and the line), `get-config`, `save-config`, `get-links`, `list-audio-devices`, `play-test-tone`, plus wizard/settings helpers. Main to renderer: `line-status` with `{ status, detail, alert }` and `audio-levels`. Line view to main: `line-heartbeat`, `line-alert`; main to line view: `audio-frame`, `gain-out`. Connect/disconnect are internal to main.
 
-- `commsJoinUrl()` — mobile: `/comms?room=&groups=&groupmode=1`
-- `lineUrl(line)` — desktop push: `room`, `push=<room>_<group>`, `group`, `groupmode=1`, audio-only flags
-- `directorUrl()` — `director=<comms_room>`, all groups
-- `applyWebRtcParams()` — adds `turn=off` / `stunonly=1` when LAN mode is on
+## File map
 
----
+| Path | Purpose |
+|---|---|
+| `app/main.js` | boot, config, audio, line view, watchdog |
+| `app/preload.js` | renderer bridge |
+| `app/shared/urls.js` | all vdo.ninja URL building |
+| `app/renderer/index.html`, `app.js` | wizard, settings, status card |
+| `app/native/coreaudio.mm`, `binding.gyp` | CoreAudio addon |
+| `packaging/com.vdo-multichan.comms.plist`, `install-agent.sh`, `uninstall-agent.sh` | LaunchAgent (see [deployment.md](deployment.md)) |
+| `.github/workflows/release.yml` | tag-triggered DMG release |
 
-## Main process audio flow (`main.js`)
+## Gotchas
 
-### Shared session (global device)
-
-1. `coreAudio.startAudio(capUid, nIn, pbUid, nOut, captureCallbackLogged)` → `"default"` session
-2. `channelViews` maps input channel → `webContents.id` for shared lines
-3. `captureCallback(ch, samples)` applies `gain_in`, sends `audio-frame` to matching view
-4. `playback-frame` IPC → `coreAudio.pushPlaybackSamples('default', outCh, floats, liveGain)`
-5. `disconnect-line` → `coreAudio.clearPlaybackChannel(outputChannel)`
-
-### Per-PL session (dedicated device)
-
-1. `connect-line` detects `shouldUsePerSession` (has own devices, different from global)
-2. `coreAudio.startSession('pl-N', capUid, 1, pbUid, 1, cb)` — separate `AudioEngine`
-3. Capture callback sends `audio-frame` to `sessionViews[lineId]`
-4. `playback-frame` → `coreAudio.pushPlaybackSamples(lc.playbackSessionId, 0, floats, liveGain)`
-   - `playbackSessionId` = `'pl-N_pb'` (separate in/out devices) or `'pl-N'` (duplex)
-5. `disconnect-line` → `coreAudio.stopSession('pl-N')`
-
-### Gain cache
-
-`inputGainByChannel` and `outputGainByLineId` maps are updated by `updateGainCache(cfg)` on load and on config save (not on audio restart). `gain_in` is applied in `captureCallback`; `gain_out` is looked up live in the `playback-frame` handler.
-
----
-
-## Native addon (`coreaudio.mm`)
-
-`std::map<string, AudioEngine> g_sessions` — one engine per session ID.
-
-| Export | Signature |
-|--------|-----------|
-| `startSession` | `(sessionId, capUid, capCh, pbUid, pbCh, capCb)` |
-| `stopSession` | `(sessionId)` — also stops `sessionId + "_pb"` |
-| `startAudio` | Legacy — delegates to `startSessionImpl("default", ...)` |
-| `stopAudio` | Legacy — stops `"default"` + `"default_pb"` |
-| `pushPlaybackSamples` | `(sessionId, ch, data, gain)` or legacy `(ch, data, gain)` |
-| `clearPlaybackChannel` | `(ch [, sessionId="default"])` |
-| `listDevices` | Returns UID, name, inChannels, outChannels |
-| `playTestTone` | `(ch, ms)` — injects a sine wave into playback ring |
-
-HAL callbacks use `clientData = &eng.uid` (pointer to the session ID string stored inside the `AudioEngine`). `stopSession` calls `AudioDeviceStop` outside `g_sessionsMutex` to avoid deadlock, then erases the map entry under lock.
-
-Max 16 channels; 48 kHz expected; ring capacity 192 000 frames; max latency 4 800 frames (~100 ms).
-
----
-
-## Current status
-
-See [known-issues.md](known-issues.md) for the full list. Summary:
-
-- **Working:** full duplex hardware routing, per-PL device sessions, grouped Comms room, live level meters, audio bleed isolation, session import/export, configurable LAN/WAN mode
-- **Open:** same-output-channel conflict (no UI warning), high-gain hard clipping (no soft limiter), unsigned DMG, macOS-only, `setPreloads` deprecation
-
----
-
-## Test environment notes
-
-- Apple Silicon MacBook Pro (arm64)
-- Typical devices: Behringer UMC404HD, BlackHole 2ch/16ch, built-in mic, USB headsets
-- macOS TCC microphone: `systemPreferences.askForMediaAccess('microphone')` on launch
-- App unsigned — right-click → Open on first launch
+- Homebrew Node omits `uv.h`; the addon uses `ThreadSafeFunction::NonBlockingCall` rather than `uv_async_t`.
+- Launch via launchd only; do not also add a login item. Two copies publishing the same stream ID kick each other (the single-instance lock is a backstop).
+- Never use `alert()`; unattended boxes must not hold modals.
