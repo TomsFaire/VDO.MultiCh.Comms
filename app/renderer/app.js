@@ -322,7 +322,15 @@ function showSetupWizard() {
 }
 
 function syncTurnVisibility() {
-  $('turn-fields').style.display = $('network-mode').value === 'internet' ? 'flex' : 'none';
+  const internet = $('network-mode').value === 'internet';
+  const custom = $('turn-custom').checked;
+  $('turn-fields').style.display = internet ? 'flex' : 'none';
+  $('turn-custom-fields').style.display = internet && custom ? 'flex' : 'none';
+  $('network-hint').textContent = !internet
+    ? 'Only boxes on the same local network can connect. Remote guests will not.'
+    : custom
+      ? 'Your TURN server relays audio when a direct connection is not possible.'
+      : "Uses VDO.ninja's built-in STUN/TURN servers. Nothing to set up.";
 }
 
 function setupSettings() {
@@ -355,6 +363,7 @@ function setupSettings() {
     $('turn-port').value = config.turn.port || '';
     $('turn-username').value = config.turn.username || '';
     $('turn-credential').value = config.turn.credential || '';
+    $('turn-custom').checked = Boolean(config.turn.host);
     $('box-name').value = config.box_name || '';
     syncTurnVisibility();
     $('session-export-code').value = exportSession();
@@ -366,6 +375,7 @@ function setupSettings() {
   });
 
   $('network-mode').addEventListener('change', syncTurnVisibility);
+  $('turn-custom').addEventListener('change', syncTurnVisibility);
 
   $('session-export-btn').addEventListener('click', () => {
     const code = exportSession();
@@ -435,12 +445,15 @@ function setupSettings() {
     config.box_name = boxName;
     config.roomcap = parseInt($('roomcap').value) || null;
     config.network_mode = $('network-mode').value;
-    config.turn = {
-      host: $('turn-host').value.trim(),
-      port: $('turn-port').value.trim(),
-      username: $('turn-username').value.trim(),
-      credential: $('turn-credential').value.trim(),
-    };
+    const customTurn = config.network_mode === 'internet' && $('turn-custom').checked;
+    config.turn = customTurn
+      ? {
+          host: $('turn-host').value.trim(),
+          port: $('turn-port').value.trim(),
+          username: $('turn-username').value.trim(),
+          credential: $('turn-credential').value.trim(),
+        }
+      : { host: '', port: '', username: '', credential: '' };
     config.input_channels_override = parseInt($('input-ch-override').value) || null;
     config.output_channels_override = parseInt($('output-ch-override').value) || null;
     updateChannelCounts();

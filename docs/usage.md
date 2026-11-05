@@ -39,8 +39,8 @@ Shows connection state, box name and location, input/output channel, output gain
 - **Room name**: lowercase letters and numbers only. Changing it reconnects the box to the new room and changes the join link, director link, and QR code. Change it on every box (or re-export the session code) so they stay together.
 - **Password**: shared room password, sent on every URL. Change it on all boxes together.
 - **Network**: Internet (default) or LAN.
-  - LAN: no TURN, STUN only, ICE candidate stripping. For boxes on the same network.
-  - Internet: enter TURN host, port, username, credential. See [self-hosting.md](self-hosting.md).
+  - Internet: nothing to fill in. VDO.ninja's built-in STUN/TURN servers are used. Tick **Use my own TURN server** only if you run one, then enter host, port, username and credential (see [self-hosting.md](self-hosting.md)).
+  - LAN: no TURN, STUN only, ICE candidate stripping. Only boxes on the same network can connect; remote guests can't.
 - **Max participants** (optional): empty means no limit. When set, vdo.ninja refuses joins beyond N. Changing it does not drop connected boxes.
 - **Box name / location**
 - **VDO.Ninja base URL**: default is the public instance (`https://vdo.ninja`); choose Custom to point at a self-hosted one.

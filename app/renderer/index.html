@@ -25,6 +25,8 @@
     .line-status.device-missing, .line-status.auth-failed { color: #f44336; }
     .line-detail { font-size: 11px; color: #aaa; min-height: 14px; word-break: break-word; }
     .line-msg { font-size: 11px; min-height: 16px; color: #f44336; }
+    .settings-hint { font-size: 11px; color: #888; margin-top: 4px; }
+    .settings-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #ccc; cursor: pointer; }
 
     /* Inline-editable name and location */
     .editable-name, .editable-location { outline: none; border-bottom: 1px dotted #555; cursor: text; }
@@ -289,11 +291,16 @@
       <div class="settings-row">
         <label>Network</label>
         <select id="network-mode">
-          <option value="lan">LAN (same network, no relay)</option>
-          <option value="internet">Internet (STUN/TURN)</option>
+          <option value="internet">Internet (recommended)</option>
+          <option value="lan">Local network only (LAN)</option>
         </select>
+        <div class="settings-hint" id="network-hint"></div>
       </div>
       <div id="turn-fields" style="display:none;flex-direction:column;gap:10px;">
+        <label class="settings-check">
+          <input type="checkbox" id="turn-custom" /> Use my own TURN server
+        </label>
+        <div id="turn-custom-fields" style="display:none;flex-direction:column;gap:10px;">
         <div class="settings-row">
           <label>TURN host</label>
           <input type="text" id="turn-host" placeholder="turn.example.com" />
@@ -309,6 +316,7 @@
         <div class="settings-row">
           <label>TURN credential</label>
           <input type="text" id="turn-credential" />
+        </div>
         </div>
       </div>
       <div class="settings-row">

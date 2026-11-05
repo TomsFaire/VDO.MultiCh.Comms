@@ -235,9 +235,9 @@ Settings has a **Network** selector; it applies to all boxes (carried in the ses
 | Mode | URL params | Use |
 |---|---|---|
 | LAN | `turn=off`, `stunonly`; ICE candidates stripped in the shim | All boxes on one network; no internet dependency |
-| Internet | `&turn=<username>;<credential>;turn:<host>:<port>` | Boxes or guests across NATs/sites |
+| Internet (default) | No `turn=` param, so vdo.ninja's built-in STUN/TURN is used. With a custom TURN server: `&turn=<username>;<credential>;turn:<host>:<port>` | Boxes or guests across NATs/sites |
 
-Internet mode fields: TURN host, port, username, credential. These match the Coturn user in section 2 (`user=commspipe:...`). Use the TLS listener (`turns:` on 5349, or 443 if your network blocks other ports) when behind corporate firewalls. The `turn=` URL format and `turns:` support should be confirmed against current vdo.ninja docs.
+Custom TURN fields appear only after ticking **Use my own TURN server** in Internet mode: TURN host, port, username, credential. These match the Coturn user in section 2 (`user=commspipe:...`). Use the TLS listener (`turns:` on 5349, or 443 if your network blocks other ports) when behind corporate firewalls. The `turn=` URL format and `turns:` support should be confirmed against current vdo.ninja docs.
 
 TURN credentials are embedded in the join link and QR shown to guests; see [security.md](security.md). Prefer a dedicated low-privilege TURN user.
 
@@ -248,6 +248,6 @@ TURN credentials are embedded in the join link and QR shown to guests; see [secu
 - [ ] Clone `steveseguin/vdo.ninja`, deploy to HTTPS host
 - [ ] Choose the custom VDO.ninja endpoint in VDO.MultiCh.Comms Settings and enter your domain (the app defaults to public vdo.ninja)
 - [ ] (Optional) Install Coturn, configure realm + credentials
-- [ ] Enter TURN host/port/username/credential in Settings (Internet mode) on every box
+- [ ] Tick **Use my own TURN server** and enter host/port/username/credential in Settings on every box (or set it once and share the session code)
 - [ ] (Optional) Edit VDO.ninja `config.js` to use your TURN server for other clients
 - [ ] Verify by launching the app, joining from a remote device, and confirming audio flows

@@ -22,7 +22,7 @@ WebRTC (VDO.Ninja)  <->  other boxes and remote guests
 
 - One persistent channel per box. One room, no groups, no per-line setup.
 - Transport is [VDO.Ninja](https://vdo.ninja) (public instance by default; self-hostable).
-- Network mode defaults to Internet (STUN/TURN). Switch to LAN in Settings for boxes on one network.
+- Network mode defaults to Internet, using VDO.ninja's built-in STUN/TURN with nothing to configure. A custom TURN server is optional. Switch to LAN in Settings for boxes on one network.
 - The status card has live mic and remote level meters; the share panel's QR code copies to the clipboard when clicked.
 - The main process connects on its own at launch from saved config. No login and no Join button, so a box recovers unattended after a reboot.
 - Target deployment: a Mac running Zoom Rooms that reboots weekly, with the app started by a launchd LaunchAgent.
