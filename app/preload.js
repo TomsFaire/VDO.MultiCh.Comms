@@ -8,11 +8,9 @@ contextBridge.exposeInMainWorld('api', {
   isFirstRun: () => ipcRenderer.invoke('is-first-run'),
   getBuildMeta: () => ipcRenderer.invoke('get-build-meta'),
   listAudioDevices: () => ipcRenderer.invoke('list-audio-devices'),
-  startAudioCapture: (uid, nCh) => ipcRenderer.invoke('start-audio-capture', uid, nCh),
-  stopAudioCapture: () => ipcRenderer.invoke('stop-audio-capture'),
-  restartPlayback: () => ipcRenderer.invoke('restart-playback'),
   playTestTone: (channel, ms) => ipcRenderer.invoke('play-test-tone', channel, ms),
-  connectLine: (id, url, inputChannel, outputChannel, gainOut, group) =>
-    ipcRenderer.invoke('connect-line', { id, url, inputChannel, outputChannel, gainOut, group }),
-  disconnectLine: (id) => ipcRenderer.invoke('disconnect-line', id),
+  reconnectLine: () => ipcRenderer.invoke('reconnect-line'),
+  getLineStatus: () => ipcRenderer.invoke('get-line-status'),
+  getLinks: () => ipcRenderer.invoke('get-links'),
+  onLineStatus: (cb) => ipcRenderer.on('line-status', (_e, state) => cb(state)),
 });

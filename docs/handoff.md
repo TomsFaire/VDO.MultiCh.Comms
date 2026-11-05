@@ -1,144 +1,94 @@
-# Agent Handoff — VDO.MultiCh.Comms
+# Handoff
 
-**Date:** 2026-06-02
-**Current build:** 0.1.0 build 28
-**Branch:** `main`
+Current architecture for the single-channel intercom. If something here disagrees with the code, the code wins; fix this file.
 
----
-
-## What this project is
-
-A macOS Electron app for multi-channel IP intercom. It connects multiple "party lines" to VDO.ninja rooms so broadcast crew (e.g. at a Faire event) can communicate across audio channels independently.
-
-**Architecture:**
-```
-Hardware mic / BlackHole
-  → Rust shim (CPAL, per-channel PCM capture)
-  → tokio::sync::broadcast (hardware-clocked, no timer)
-  → WebSocket ws://127.0.0.1:9696
-  → Electron WebContentsView preload (AudioWorklet bridge)
-  → VDO.ninja getUserMedia override
-  → WebRTC → remote participants (phone, web browser)
-```
-
----
-
-## Repo layout
+## Architecture
 
 ```
-app/              Electron app (Node.js main + HTML/JS renderer)
-  main.js         Main process — shim lifecycle, IPC, WebContentsView setup
-  preload.js      Renderer preload — exposes IPC to renderer
-  renderer/
-    app.js        UI logic (connectShim closes after device list — critical)
-    index.html    UI shell + styles
-  assets/
-    icon.icns     App icon
-  scripts/
-    bump-build.js Auto-increments build-meta.json before each dist build
-    make-icns.sh  PNG → ICNS conversion
-  build-meta.json { "version": "0.1.0", "build": 28 }
-  package.json    electron-builder config, targets mac arm64 DMG
-
-shim/             Rust audio shim
-  src/main.rs     WebSocket server, broadcast dispatch
-  src/audio.rs    CPAL capture (broadcast) + playback (ring buffer)
+Electron main (app/main.js)
+  - loads config, single-instance lock, boot sequence
+  - loads coreaudio.node: enumerate devices, capture input, play output
+  - owns ONE line view (hidden WebContentsView -> vdo.ninja URL)
+  - connectLine() / disconnectLine(), watchdog, powerSaveBlocker
+  - builds all vdo.ninja URLs via the shared URL module
+Preload shim (injected into the line view)
+  - getUserMedia -> hardware input channel (AudioWorklet fed from main)
+  - taps EVERY remote audio track into one remote-cap worklet (summed), sent to the hardware output channel
+  - sends line-heartbeat IPC every 5s
+Renderer (app/renderer/) - settings and a single status card
 ```
 
----
+## Boot sequence
 
-## How to build
+`whenReady` -> `requestSingleInstanceLock()` -> load config.
 
-```bash
-# Rebuild shim whenever audio.rs or main.rs changes
-cd shim && cargo build --release
+- `configured: true`: window stays hidden (`show: false`), `startLine()` starts audio with capture in main, then `connectLine()`.
+- Otherwise: show window, run the wizard. Only a completed wizard or a session import sets `configured: true`. An abandoned wizard never auto-joins.
+- `save-config` calls `restartLine()` when the config becomes configured or any device, channel, network, room, password, box name, location or roomcap value changes. A `gain_out`-only change is pushed live to the shim (`gain-out`) without reconnecting. The renderer never starts capture.
+- Closing the window hides it; `before-quit` sets `isQuitting` so Cmd-Q really quits. `activate` and `second-instance` show the window.
 
-# Build DMG (auto-bumps build number)
-cd app && npm run build
-# Output: app/dist/VDO.MultiCh.Comms-0.1.0-arm64.dmg
+Windows and the line view use `backgroundThrottling: false`; `powerSaveBlocker('prevent-app-suspension')` is held while connected.
 
-# Run dev (no DMG, shim must be pre-built)
-cd app && npx electron .
-```
+## Device resolution
 
-The v0.1.0 DMG is published on the [GitHub Releases page](../../releases). For end-user install instructions see [docs/usage.md](usage.md); for full source build details see [docs/development.md](development.md).
+One helper in main (`findDevice` / `resolveAudioDevices`) matches input/output by UID, then by exact name, then case-insensitive substring. If a configured device matches neither, status is `device-missing` and `startLine()` retries every 10s (late-enumerating USB interfaces) until audio starts, then connects. Name-fallback matches and misses are logged. The renderer's device lookup uses the same UID-then-name order. An input or output with no UID and no name means no capture/playback on that side.
 
-**Run from terminal to see logs:**
-```bash
-/path/to/VDO.MultiCh.Comms.app/Contents/MacOS/VDO.MultiCh.Comms
-```
+## Watchdog
 
-If the previous DMG is still mounted, eject it first:
-```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms 0.1.0" -force
-```
+Watches the line view's `webContents`: main-frame `did-fail-load`, `render-process-gone`, `unresponsive`, a stale `line-heartbeat` (over 20s, checked after a 30s grace from connect), a `line-alert`, `powerMonitor` `resume`, and an offline to online change of `net.isOnline()` (polled every 10s). Any trigger schedules one reconnect (`disconnectLine()` then `connectLine()`) with exponential backoff from 2s to 60s; there is never more than one pending timer. Backoff resets after the line has been healthy for 60s. It never uses peer count (zero peers is normal).
 
----
+The shim overrides `alert`/`confirm`/`prompt` to be non-blocking and forwards the text over `line-alert` (a blocking dialog would freeze the hidden view). vdo.ninja alerts, such as "stream ID in use" after a power cycle, therefore cause a retry. A `did-navigate` away from the push URL's origin and path (e.g. a login page) sets `auth-failed` and reconnects at the maximum backoff.
 
-## Current status (build 28)
+Status values (`line-status` payload `{ status, detail, alert }`): `disconnected` (not configured), `connecting` (until first heartbeat), `connected`, `reconnecting` (during backoff; `detail` is the reason), `device-missing` (also used when audio fails to start; `detail` explains; retried every 10s), `auth-failed`.
 
-### Working
-- First-run setup wizard, session export/import, QR codes, director links
-- VDO.ninja WebContentsView auto-joins rooms silently (`&webcam=1&vd=0&autostart=1`)
-- **Outbound audio via shim bridge** ✅ — stable as of build 28
-- **Mic change reconnect** ✅ — changing input device in Settings reconnects all active lines automatically
-- Inbound audio (remote → Electron speakers) ✅
-- Shim auto-starts on launch, restarts on Settings save
-- Build number in footer
+## Shared URL module
 
-### Known open issues
-1. **Inbound audio not routed to hardware output** — playback ring buffers exist in the Rust shim (`playback_producers`) but aren't fed from VDO.ninja WebRTC output. Remote audio plays through Electron's default audio output device, not a specific hardware channel.
+All vdo.ninja URLs (push, guest join link, director link) are built in `app/shared/urls.js`, used by main. It takes config and returns URLs:
 
-2. **STUN/TURN DNS failures** — cosmetic noise in logs. Works on LAN via host ICE candidates; cross-NAT requires a TURN server.
+- Push: `room`, `push=<sanitised box_name>`, `label`, audio params, `password`, network params, `roomcap` if set
+- Join link: `/comms?room=...` (falls back to `/?room=...` if `/comms` misbehaves without groups)
+- Director link: room + password
+- Network: `lan` adds `turn=off` + `stunonly` (and the shim strips ICE candidates); `internet` adds `&turn=<username>;<credential>;turn:<host>:<port>`
+- Auth: config `auth` section; MVP is `{ mode: 'password' }`. SSO later adds `{ mode: 'sso', universaltoken }` here only. See [security.md](security.md).
 
-3. **`session.setPreloads` deprecation** — low priority, still works.
+## Config schema (`~/.vdo-multichan/config.json`)
 
-4. **App unsigned** — right-click → Open on first launch.
+| Key | Notes |
+|---|---|
+| `configured` | true only after wizard/import |
+| `comms_room`, `comms_password`, `vdo_base_url` | shared by all boxes |
+| `box_name` | unique per box; becomes the push ID |
+| `location` | display only |
+| `input_device_uid` / `input_device_name`, `output_device_uid` / `output_device_name` | resolved UID then name |
+| `input_channel`, `output_channel`, `gain_out`, channel overrides | |
+| `network_mode` | `lan` or `internet` |
+| `turn` | `{ host, port, username, credential }`, used in internet mode |
+| `roomcap` | `null` = no limit (no param sent) |
 
----
+Removed: `lines[]`, `group`, `gain_in`, `instance_name`, `webrtc_*` flags. A config containing `lines` (old schema) is renamed to `config.json.bak` and the app starts unconfigured.
 
-## Key implementation details
+## Session code
 
-### Shim broadcast dispatch (audio.rs)
-The CPAL input callback accumulates interleaved samples into pre-allocated per-channel `Vec<f32>` buffers. When all channels reach `FRAME_SIZE` (480 samples = 10ms @ 48kHz), a multi-channel binary packet is packed and sent via `tokio::sync::broadcast::Sender`. `send()` is non-async and safe to call from the real-time CPAL thread.
+Base64 of `{ v: 3, comms_room, comms_password, vdo_base_url, network_mode, turn }`. No box name or devices, so every box gets identical network settings. Non-v3 codes are rejected.
 
-Packet format: `[ch: u32 LE][n_samples: u32 LE][samples: f32[] LE]` × N channels (N = actual device channel count, max CHANNEL_COUNT=4).
+## IPC (renderer <-> main)
 
-### Per-client broadcast receivers (main.rs)
-Each `handle_client` subscribes to the broadcast with `frame_tx.subscribe()`. A `cap_task` tokio task loops on `rx.recv().await` and forwards frames as binary WebSocket messages. If a client lags (slow WS write), the broadcast drops old frames with a `Lagged` warning — no global backpressure.
+Renderer to main: `get-line-status`, `reconnect-line` (restarts audio and the line), `get-config`, `save-config`, `get-links`, `list-audio-devices`, `play-test-tone`, plus wizard/settings helpers. Main to renderer: `line-status` with `{ status, detail, alert }`. Line view to main: `line-heartbeat`, `line-alert`; main to line view: `audio-frame`, `gain-out`. Connect/disconnect are internal to main.
 
-### AudioWorklet bridge (main.js buildShimScript)
-Injected as a preload into each line's `WebContentsView` via `session.setPreloads` with `contextIsolation: false`. Overrides `getUserMedia` synchronously before VDO.ninja JS runs.
+## File map
 
-- Ring buffer: 96000 samples (2s) Float32Array, startup hold 24000 samples (500ms)
-- Parses multi-channel packets from WS, pushes matching channel into ring
-- Falls back to native mic if shim WS unavailable within 10s
-- `audioCtx.resume()` called at WS open and again before resolving stream (autoplay policy defence)
+| Path | Purpose |
+|---|---|
+| `app/main.js` | boot, config, audio, line view, watchdog |
+| `app/preload.js` | renderer bridge |
+| `app/shared/urls.js` | all vdo.ninja URL building |
+| `app/renderer/index.html`, `app.js` | wizard, settings, status card |
+| `app/native/coreaudio.mm`, `binding.gyp` | CoreAudio addon |
+| `packaging/com.vdo-multichan.comms.plist`, `install-agent.sh`, `uninstall-agent.sh` | LaunchAgent (see [deployment.md](deployment.md)) |
+| `.github/workflows/release.yml` | tag-triggered DMG release |
 
-### Renderer WS connection (app.js connectShim)
-The renderer connects to 9696 solely to get the device list for Settings dropdowns. **It closes immediately (code 1000) after receiving the `devices` message.** If it stayed connected, it would starve the preload's audio receiver by competing for frames on the same broadcast channel.
+## Gotchas
 
-### Mic change reconnect (main.js)
-`lineConfigs` map (id → `{url, channelId}`) tracks all active lines. After `killPortAndStartShim` spawns a new shim process, a 1s timer fires and reconnects every line in `lineConfigs` — destroying the old `WebContentsView` and creating a new one with a fresh preload script pointing to the new shim.
-
-### Shim binary path
-```js
-app.isPackaged
-  ? path.join(process.resourcesPath, 'shim')   // packaged app
-  : path.join(__dirname, '..', 'shim', 'target', 'release', 'shim')  // dev
-```
-
-### VDO.ninja join URL
-```
-https://vdo.ninja/?room=ROOMKEY&webcam=1&vd=0&videodevice=0&autostart=1&label=NAME&monomic=1&proaudio=1&noisetgate=0&compressor=0&autoGain=0
-```
-`&webcam=1` is required for `&autostart=1` to bypass the device selection screen.
-
----
-
-## Environment / test machine
-- Apple Silicon MacBook Pro (arm64)
-- Audio devices: BlackHole 16ch, BlackHole 2ch, MacBook Pro Microphone, NDI Audio, Microsoft Teams Audio, ZoomAudioDevice
-- MacBook Pro Speakers: NOT enumerated by CPAL — shim falls back to `default_output_device()` when empty or unmatched
-- App unsigned — right-click → Open on first launch
-- macOS TCC microphone: granted
+- Homebrew Node omits `uv.h`; the addon uses `ThreadSafeFunction::NonBlockingCall` rather than `uv_async_t`.
+- Launch via launchd only; do not also add a login item. Two copies publishing the same stream ID kick each other (the single-instance lock is a backstop).
+- Never use `alert()`; unattended boxes must not hold modals.

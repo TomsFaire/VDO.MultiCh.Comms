@@ -1,7 +1,7 @@
 {
   "name": "vdo-multichan-comms",
   "version": "0.1.1",
-  "description": "Multi-channel IP intercom via VDO.ninja + CPAL audio shim",
+  "description": "Single-channel IP intercom via VDO.Ninja + CoreAudio",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

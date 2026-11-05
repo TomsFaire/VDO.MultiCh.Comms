@@ -33,7 +33,7 @@ cd vdo.ninja
 # Serve with nginx, Caddy, or any static host
 ```
 
-Remote mobile users join via `{vdo_base_url}/comms` — ensure your instance serves that path (it's included in the standard VDO.ninja repo).
+Remote guests join via `{vdo_base_url}/comms` — ensure your instance serves that path (it's included in the standard VDO.ninja repo).
 
 **nginx example (`/etc/nginx/sites-available/vdo`):**
 ```nginx
@@ -53,11 +53,13 @@ server {
 }
 ```
 
-Once deployed, set `vdo_base_url` in your config (or via the Settings UI) to `https://live.yourdomain.com`.
+Once deployed, set the VDO.Ninja base URL in Settings (`vdo_base_url` in config) to `https://live.yourdomain.com`.
 
 ---
 
 ## 2. TURN server (Coturn)
+
+The app takes TURN settings directly (see [Network settings](#network-settings-in-the-app)), so you do not need to edit VDO.ninja's `config.js` for the app's own boxes.
 
 Required when peers are behind symmetric NAT and can't connect peer-to-peer. A VPS with a public IP is sufficient.
 
@@ -92,9 +94,9 @@ systemctl restart coturn
 
 Open firewall ports: TCP/UDP 3478, TCP/UDP 5349, UDP 49152–65535.
 
-### Point VDO.ninja at your TURN server
+### Point a self-hosted VDO.ninja at your TURN server (optional)
 
-In your cloned VDO.ninja repo, edit `config.js` (or `turnconfig.js` depending on version):
+Only needed if other clients (not the app) should use it by default. In your cloned VDO.ninja repo, edit `config.js` (or `turnconfig.js` depending on version):
 
 ```js
 // config.js
@@ -136,10 +138,26 @@ VDO.ninja uses a hosted WebSocket signaling server (`wss://ws.vdo.ninja`). For m
 
 ---
 
+## Network settings in the app
+
+Settings has a **Network** selector; it applies to all boxes (carried in the session code).
+
+| Mode | URL params | Use |
+|---|---|---|
+| LAN | `turn=off`, `stunonly`; ICE candidates stripped in the shim | All boxes on one network; no internet dependency |
+| Internet | `&turn=<username>;<credential>;turn:<host>:<port>` | Boxes or guests across NATs/sites |
+
+Internet mode fields: TURN host, port, username, credential. These match the Coturn user in section 2 (`user=commspipe:...`). Use the TLS listener (`turns:` on 5349, or 443 if your network blocks other ports) when behind corporate firewalls. The `turn=` URL format and `turns:` support should be confirmed against current vdo.ninja docs.
+
+TURN credentials are embedded in the join link and QR shown to guests; see [security.md](security.md). Prefer a dedicated low-privilege TURN user.
+
+---
+
 ## Quick-start checklist
 
 - [ ] Clone `steveseguin/vdo.ninja`, deploy to HTTPS host
 - [ ] Set `vdo_base_url` in VDO.MultiCh.Comms settings to your domain
 - [ ] (Optional) Install Coturn, configure realm + credentials
-- [ ] (Optional) Edit VDO.ninja `config.js` to use your TURN server
-- [ ] Verify by launching the app, joining a line from a remote device, and confirming audio flows
+- [ ] Enter TURN host/port/username/credential in Settings (Internet mode) on every box
+- [ ] (Optional) Edit VDO.ninja `config.js` to use your TURN server for other clients
+- [ ] Verify by launching the app, joining from a remote device, and confirming audio flows
