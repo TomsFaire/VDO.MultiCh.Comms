@@ -229,10 +229,20 @@ function buildLineShim(inputChannel, outputChannel, gainOut, stripIceServers) {
         if (el.srcObject.getAudioTracks) el.srcObject.getAudioTracks().forEach(tapTrack);
       }
 
+      // Silence vdo.ninja's own media elements so remote audio can't leak out of
+      // the system default output. The tap reads the MediaStreamTrack directly,
+      // so muting the element does not affect it.
+      function silenceElement(el) {
+        if (!el) return;
+        el.muted = true;
+        el.volume = 0;
+      }
+
       function watchElement(el) {
         if (!el || seenElements.has(el)) return;
         seenElements.add(el);
-        el.addEventListener('playing', () => maybeTapElement(el));
+        silenceElement(el);
+        el.addEventListener('playing', () => { silenceElement(el); maybeTapElement(el); });
         if (el.srcObject) maybeTapElement(el);
       }
 
@@ -248,6 +258,7 @@ function buildLineShim(inputChannel, outputChannel, gainOut, stripIceServers) {
 
       document.querySelectorAll('video,audio').forEach(watchElement);
       setInterval(() => {
+        document.querySelectorAll('video,audio').forEach(silenceElement);
         document.querySelectorAll('video,audio').forEach(maybeTapElement);
       }, 3000);
     } catch (err) {
@@ -274,7 +285,7 @@ const DEFAULT_CONFIG = {
   gain_out: 1.0,
   input_channels_override: null,
   output_channels_override: null,
-  network_mode: 'lan',
+  network_mode: 'internet',
   turn: { host: '', port: '', username: '', credential: '' },
   roomcap: null,
   auth: { mode: 'password' },
@@ -336,6 +347,13 @@ let lineOutputChannel = 0;
 let mainWin = null;
 let isQuitting = false;
 let playbackFrameCount = 0;
+
+// Live level meters: running peaks, sent to the renderer at ~30 fps and decayed
+// each frame (0.85^30 ≈ 1% after ~1s).
+let capturePeak = 0;
+let playbackPeak = 0;
+const LEVEL_DECAY = 0.85;
+const LEVEL_INTERVAL_MS = 33;
 
 const lineState = { status: 'disconnected', detail: '', alert: '' };
 let reconnectTimer = null;
@@ -488,12 +506,19 @@ function disconnectLine() {
   if (mainWin && !mainWin.isDestroyed()) mainWin.contentView.removeChildView(view);
   view.webContents.close();
   try { fs.unlinkSync(SHIM_PATH); } catch (_) {}
-  try { coreAudio.clearPlaybackChannel(lineOutputChannel); } catch (_) {}
+  try { coreAudio.clearPlaybackChannel(lineOutputChannel, 'default'); } catch (_) {}
   console.log('Line disconnected');
 }
 
 function captureCallback(ch, samples) {
-  if (!lineView || ch !== lineInputChannel) return;
+  if (ch !== lineInputChannel) return;
+  let p = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const a = Math.abs(samples[i]);
+    if (a > p) p = a;
+  }
+  if (p > capturePeak) capturePeak = p;
+  if (!lineView) return;
   const wc = lineView.webContents;
   if (!wc.isDestroyed()) wc.send('audio-frame', ch, samples);
 }
@@ -568,6 +593,8 @@ function startLine() {
     setLineStatus('disconnected');
     return;
   }
+  lineInputChannel = cfg.input_channel;
+  lineOutputChannel = cfg.output_channel;
   const audio = startAudio(cfg);
   if (!audio.ok) {
     const detail = audio.missing
@@ -615,6 +642,17 @@ function createMainWindow(title, show) {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+}
+
+function startLevelMeters() {
+  setInterval(() => {
+    const levels = { capture: capturePeak, playback: playbackPeak };
+    capturePeak *= LEVEL_DECAY;
+    playbackPeak *= LEVEL_DECAY;
+    if (mainWin && !mainWin.isDestroyed() && mainWin.isVisible()) {
+      mainWin.webContents.send('audio-levels', levels);
+    }
+  }, LEVEL_INTERVAL_MS);
 }
 
 function watchNetworkAndPower() {
@@ -689,7 +727,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
 
   ipcMain.on('clear-playback', (_e, outCh) => {
     try {
-      coreAudio.clearPlaybackChannel(outCh ?? 0);
+      coreAudio.clearPlaybackChannel(outCh ?? 0, 'default');
     } catch (err) {
       console.error('clear-playback error:', err.message);
     }
@@ -712,7 +750,8 @@ if (hasInstanceLock) app.whenReady().then(() => {
         if (a > peak) peak = a;
       }
       if (peak < 0.002) return;
-      coreAudio.pushPlaybackSamples(outCh, floats, gain ?? 1.0);
+      if (peak > playbackPeak) playbackPeak = peak;
+      coreAudio.pushPlaybackSamples('default', outCh, floats, gain ?? 1.0);
       playbackFrameCount++;
       if (playbackFrameCount === 1 || playbackFrameCount % 500 === 0) {
         console.log(`playback-frame batch #${playbackFrameCount} → out ch ${outCh} (${floats.length} samples, peak=${peak.toFixed(4)})`);
@@ -759,6 +798,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
     }
   });
 
+  startLevelMeters();
   watchNetworkAndPower();
   startLine();
 });

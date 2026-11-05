@@ -30,23 +30,26 @@ Devices are matched by UID, then by name. If the interface is missing at boot (l
 
 ## Status card
 
-Shows connection state, box name and location, input/output channel, output gain, a test tone, and Reconnect. States distinguish network problems from authentication problems.
+Shows connection state, box name and location, input/output channel, output gain (0 to 10), a test tone, and Reconnect. States distinguish network problems from authentication problems.
+
+**Level meters:** two bars under the gain slider. Green is the mic (capture frames for this box's input channel); blue is remote audio (playback frames pushed to its output channel). Both turn yellow at 60% and red at 95%, and fall back over about a second. They only update while the window is visible.
 
 ## Settings
 
+- **Room name**: lowercase letters and numbers only. Changing it reconnects the box to the new room and changes the join link, director link, and QR code. Change it on every box (or re-export the session code) so they stay together.
 - **Password**: shared room password, sent on every URL. Change it on all boxes together.
-- **Network**: LAN or Internet.
+- **Network**: Internet (default) or LAN.
   - LAN: no TURN, STUN only, ICE candidate stripping. For boxes on the same network.
   - Internet: enter TURN host, port, username, credential. See [self-hosting.md](self-hosting.md).
 - **Max participants** (optional): empty means no limit. When set, vdo.ninja refuses joins beyond N. Changing it does not drop connected boxes.
 - **Box name / location**
-- **VDO.Ninja base URL**: default is the public instance.
+- **VDO.Ninja base URL**: default is the public instance (`https://vdo.ninja`); choose Custom to point at a self-hosted one.
 
 ## Adding a remote guest
 
 Send them two things:
 
-1. The **join link** (or QR code) from the status/share panel
+1. The **join link** (or QR code) from the share panel. Click the QR image to copy it as a PNG to the clipboard (falls back to copying the link text)
 2. The room **password**
 
 They open the link on any phone or browser, allow the microphone, and enter the password. No app or account needed. The link includes the password and TURN credentials in Internet mode, so treat it as a secret. See [security.md](security.md).

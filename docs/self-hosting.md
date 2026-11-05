@@ -2,6 +2,8 @@
 
 VDO.MultiCh.Comms uses VDO.ninja for WebRTC transport. This guide explains how to host each component yourself.
 
+**The app defaults to the public instance, `https://vdo.ninja`.** Self-hosting is optional. To use your own instance, set the VDO.ninja endpoint to a custom URL in Settings (stored as `vdo_base_url`; it travels in the session code, so every box picks it up).
+
 ## What depends on what
 
 ```
@@ -33,7 +35,7 @@ cd vdo.ninja
 # Serve with nginx, Caddy, or any static host
 ```
 
-Remote guests join via `{vdo_base_url}/comms` — ensure your instance serves that path (it's included in the standard VDO.ninja repo).
+Remote guests join via `{vdo_base_url}/comms?room=<room>`. The file ships in the standard VDO.ninja repo, but your web server has to route `/comms` to it (see the nginx example).
 
 **nginx example (`/etc/nginx/sites-available/vdo`):**
 ```nginx
@@ -47,13 +49,16 @@ server {
     root /var/www/vdo.ninja;
     index index.html;
 
+    # /comms must serve comms.html, otherwise the guest join link returns 404
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri.html $uri/ /index.html;
     }
 }
 ```
 
-Once deployed, set the VDO.Ninja base URL in Settings (`vdo_base_url` in config) to `https://live.yourdomain.com`.
+`$uri.html` is what makes `/comms` resolve to `comms.html`. Without it the join link 404s.
+
+Once deployed, choose the custom instance in Settings and enter `https://live.yourdomain.com`. Until you do, the app keeps using public vdo.ninja.
 
 ---
 
@@ -136,11 +141,96 @@ VDO.ninja uses a hosted WebSocket signaling server (`wss://ws.vdo.ninja`). For m
 - The signaling server is a small Node.js process.
 - Once running, point VDO.ninja's `config.js` at your signaling WSS endpoint.
 
+**Cloudflare Tunnel note:** the signaling source (`vdoninja-http.js`) is a plain HTTP/WS server. If it sits behind a Cloudflare Tunnel, the tunnel's service URL must be `http://`, not `https://`. With `https://` the tunnel attempts a TLS handshake to the container and fails, and `noTLSVerify` does not bypass that handshake. Cloudflare terminates TLS at the edge, so clients still connect with `wss://`.
+
+---
+
+## Reference deployment (self-hosted, two machines)
+
+This is the layout currently in use: all three components on two machines (.22 and .60) behind a Cloudflare Tunnel for HA. The tunnel fails over between connectors without intervention.
+
+| Component | URL / endpoint | Machines |
+|---|---|---|
+| VDO.ninja frontend | `https://vdo.yourdomain.com` | .22 (port 8900) + .60 (port 8900) |
+| Signaling (WSS) | `wss://vdo-handshake.yourdomain.com` | .22 (port 8910) + .60 (port 8910) |
+| TURN server | `turn:192.168.1.22:3478` / `turn:192.168.1.60:3478` | LAN only. Cloudflare Tunnel can't proxy UDP |
+
+To use it, set the custom endpoint in Settings to `https://vdo.yourdomain.com`.
+
+### Frontend (nginx:alpine)
+
+Static files live at:
+- SkullAi (primary): `/home/tom/stack/vdo-ninja/html/`
+- docker .22 (replica): `/home/tom/docker/vdo-ninja/html/`
+
+**Always edit on SkullAi first.** A nightly cron (3am) rsyncs html from SkullAi to .22. To propagate immediately, run `/home/tom/bin/vdo-sync.sh`.
+
+Key config in `html/index.html`:
+```js
+session.wss = "wss://vdo-handshake.yourdomain.com:443";
+session.customWSS = true;
+// TURN servers (LAN only):
+turn.username = "vdoninja";
+turn.credential = "vdoninja_turn_pass";
+turn.urls = ["turn:192.168.1.22:3478", "turn:192.168.1.60:3478"];
+```
+
+### Signaling server (vdo-handshake)
+
+Plain HTTP/WS server on port 443 inside the container. TLS is terminated by Cloudflare at the edge, so clients see `wss://vdo-handshake.yourdomain.com` (and the tunnel service URL is `http://`, see above).
+
+Source: `/home/tom/stack/vdo-ninja/handshake/vdoninja-http.js` (SkullAi primary).
+
+The two signaling instances don't share room state (in-memory only). WebRTC media is P2P, so a Cloudflare failover mid-session won't drop streams, but new connections briefly re-establish signaling.
+
+Rebuild after source changes:
+```bash
+# SkullAi
+ssh tom@192.168.1.60 "cd /home/tom/stack && docker compose build vdo-handshake && docker compose up -d vdo-handshake"
+# .22
+cd /home/tom/docker && docker compose build vdo-handshake && docker compose up -d vdo-handshake
+```
+
+### Coturn on both machines
+
+Config at `/home/tom/stack/coturn/turnserver.conf` (SkullAi) and `/home/tom/docker/coturn/turnserver.conf` (.22):
+
+```conf
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+lt-cred-mech
+realm=skullai.local
+user=vdoninja:vdoninja_turn_pass
+```
+
+Apply changes to both machines:
+```bash
+/home/tom/bin/vdo-sync.sh   # syncs conf from SkullAi to .22
+docker restart coturn
+ssh tom@192.168.1.60 "docker restart coturn"
+```
+
+### Keeping .22 and .60 in sync
+
+**SkullAi (.60) is the source of truth** for all VDO.ninja files. Make changes there, then run `/home/tom/bin/vdo-sync.sh` (html, handshake source, coturn conf to .22). The script does not restart containers on SkullAi; do that manually after editing on .60.
+
+### Adding public TURN to the reference deployment
+
+The coturn setup above is LAN-only. For remote participants over the internet:
+
+1. Forward UDP/TCP 3478 and UDP 49152-65535 through your router to one or both machines.
+2. Update the `index.html` TURN URLs to a WAN IP or DDNS hostname.
+3. Optionally update coturn `realm` to match your public domain.
+4. Run `vdo-sync.sh` and restart coturn on both machines.
+
+A VPS with a static public IP running coturn is more reliable than NAT hairpinning. The app's own TURN fields (below) are the simpler route for the app's boxes.
+
 ---
 
 ## Network settings in the app
 
-Settings has a **Network** selector; it applies to all boxes (carried in the session code).
+Settings has a **Network** selector; it applies to all boxes (carried in the session code). The default is **Internet**.
 
 | Mode | URL params | Use |
 |---|---|---|
@@ -156,7 +246,7 @@ TURN credentials are embedded in the join link and QR shown to guests; see [secu
 ## Quick-start checklist
 
 - [ ] Clone `steveseguin/vdo.ninja`, deploy to HTTPS host
-- [ ] Set `vdo_base_url` in VDO.MultiCh.Comms settings to your domain
+- [ ] Choose the custom VDO.ninja endpoint in VDO.MultiCh.Comms Settings and enter your domain (the app defaults to public vdo.ninja)
 - [ ] (Optional) Install Coturn, configure realm + credentials
 - [ ] Enter TURN host/port/username/credential in Settings (Internet mode) on every box
 - [ ] (Optional) Edit VDO.ninja `config.js` to use your TURN server for other clients

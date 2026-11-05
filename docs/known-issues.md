@@ -32,6 +32,10 @@ Should migrate to `session.registerPreloadScript`. Low priority — `setPreloads
 
 ## Working
 
+- Live mic (green) and remote (blue) level meters on the status card
+- Room name editable in Settings (reconnects automatically)
+- Internet network mode by default; LAN mode available in Settings
+- Click the QR code to copy it
 - Single-channel wizard (new session or join with session code), session export / import
 - Device enumeration and capture/playback via the CoreAudio addon
 - Auto-join from saved config, hidden, with watchdog reconnect

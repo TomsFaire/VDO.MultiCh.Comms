@@ -48,7 +48,8 @@ All vdo.ninja URLs (push, guest join link, director link) are built in `app/shar
 - Push: `room`, `push=<sanitised box_name>`, `label`, audio params, `password`, network params, `roomcap` if set
 - Join link: `/comms?room=...` (falls back to `/?room=...` if `/comms` misbehaves without groups)
 - Director link: room + password
-- Network: `lan` adds `turn=off` + `stunonly` (and the shim strips ICE candidates); `internet` adds `&turn=<username>;<credential>;turn:<host>:<port>`
+- Join link: no `sampleRate` and no `stunonly` (the receiver page doesn't need them; `turn=off` covers LAN)
+- Network (default `internet`): `lan` adds `turn=off` + `stunonly` on push/director URLs (and the shim strips ICE candidates); `internet` adds `&turn=<username>;<credential>;turn:<host>:<port>`
 - Auth: config `auth` section; MVP is `{ mode: 'password' }`. SSO later adds `{ mode: 'sso', universaltoken }` here only. See [security.md](security.md).
 
 ## Config schema (`~/.vdo-multichan/config.json`)
@@ -61,7 +62,7 @@ All vdo.ninja URLs (push, guest join link, director link) are built in `app/shar
 | `location` | display only |
 | `input_device_uid` / `input_device_name`, `output_device_uid` / `output_device_name` | resolved UID then name |
 | `input_channel`, `output_channel`, `gain_out`, channel overrides | |
-| `network_mode` | `lan` or `internet` |
+| `network_mode` | `internet` (default) or `lan` |
 | `turn` | `{ host, port, username, credential }`, used in internet mode |
 | `roomcap` | `null` = no limit (no param sent) |
 
@@ -73,7 +74,13 @@ Base64 of `{ v: 3, comms_room, comms_password, vdo_base_url, network_mode, turn 
 
 ## IPC (renderer <-> main)
 
-Renderer to main: `get-line-status`, `reconnect-line` (restarts audio and the line), `get-config`, `save-config`, `get-links`, `list-audio-devices`, `play-test-tone`, plus wizard/settings helpers. Main to renderer: `line-status` with `{ status, detail, alert }`. Line view to main: `line-heartbeat`, `line-alert`; main to line view: `audio-frame`, `gain-out`. Connect/disconnect are internal to main.
+Level meters: main keeps a running peak of capture frames for the input channel and of playback frames pushed to the output channel, decays both by 0.85 every 33 ms, and sends `audio-levels` `{ capture, playback }` (0 to 1) to the renderer while the window is visible. The renderer scales by 200% and colours green/blue, yellow at 60%, red at 95%.
+
+Audio bleed: the line shim mutes and zeroes the volume of every vdo.ninja `<video>`/`<audio>` element on discovery, on each `playing` event, and every 3 s, so remote audio can't leak out of the system default output. The remote tap reads each `MediaStreamTrack` directly, so it keeps working.
+
+Playback goes to the native addon's `default` session explicitly: `pushPlaybackSamples('default', ch, floats, gain)` and `clearPlaybackChannel(ch, 'default')`.
+
+Renderer to main: `get-line-status`, `reconnect-line` (restarts audio and the line), `get-config`, `save-config`, `get-links`, `list-audio-devices`, `play-test-tone`, plus wizard/settings helpers. Main to renderer: `line-status` with `{ status, detail, alert }` and `audio-levels`. Line view to main: `line-heartbeat`, `line-alert`; main to line view: `audio-frame`, `gain-out`. Connect/disconnect are internal to main.
 
 ## File map
 

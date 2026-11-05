@@ -126,6 +126,26 @@ function renderStatus(state) {
   $('connect-btn').textContent = status === 'disconnected' ? 'Connect' : 'Reconnect';
 }
 
+// Meter colours: green mic / blue remote, yellow from 60%, red from 95%.
+function meterColor(pct, isMic) {
+  if (pct >= 95) return '#e53935';
+  if (pct >= 60) return '#f9a825';
+  return isMic ? '#4caf50' : '#4a8abf';
+}
+
+function setMeter(id, level, isMic) {
+  const bar = $(id);
+  if (!bar) return;
+  const pct = Math.min(100, (level || 0) * 200);
+  bar.style.width = `${pct}%`;
+  bar.style.background = meterColor(pct, isMic);
+}
+
+window.api.onAudioLevels(({ capture, playback }) => {
+  setMeter('meter-mic', capture, true);
+  setMeter('meter-remote', playback, false);
+});
+
 function renderLineCard() {
   $('line-box-name').textContent = config.box_name || '';
   $('line-location').textContent = config.location || '';
@@ -147,6 +167,20 @@ function flashButton(id) {
   const original = btn.textContent;
   btn.textContent = 'Copied!';
   setTimeout(() => (btn.textContent = original), 1500);
+}
+
+async function copyQrImage() {
+  const img = $('qr-comms');
+  if (!img?.src) return;
+  try {
+    const blob = await (await fetch(img.src)).blob();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+  } catch (_) {
+    navigator.clipboard.writeText($('comms-join-url').value);
+  }
+  const wrap = img.closest('.qr-wrap');
+  wrap.classList.add('copied');
+  setTimeout(() => wrap.classList.remove('copied'), 1200);
 }
 
 function copyCommsLink() {
@@ -221,7 +255,7 @@ function applySession(code) {
   config.comms_room = sanitiseKey(parsed.comms_room);
   config.comms_password = parsed.comms_password || '';
   config.vdo_base_url = parsed.vdo_base_url || 'https://vdo.ninja';
-  config.network_mode = parsed.network_mode === 'internet' ? 'internet' : 'lan';
+  config.network_mode = parsed.network_mode === 'lan' ? 'lan' : 'internet';
   config.turn = { host: '', port: '', username: '', credential: '', ...parsed.turn };
 }
 
@@ -313,6 +347,7 @@ function setupSettings() {
     $('output-ch-detected').textContent = `(detected: ${detected.outCount})`;
     $('input-ch-override').value = config.input_channels_override || '';
     $('output-ch-override').value = config.output_channels_override || '';
+    $('comms-room-input').value = config.comms_room || '';
     $('comms-password').value = config.comms_password || '';
     $('roomcap').value = config.roomcap || '';
     $('network-mode').value = config.network_mode;
@@ -381,6 +416,11 @@ function setupSettings() {
       setMsg('settings-msg', 'Box name is required.');
       return;
     }
+    const roomName = sanitiseKey($('comms-room-input').value);
+    if (roomName.length < 2) {
+      setMsg('settings-msg', 'Room name must be at least 2 letters or numbers.');
+      return;
+    }
     const inUid = $('input-device-select').value;
     const outUid = $('output-device-select').value;
     const inDev = shimDevices.inputs.find(d => d.uid === inUid);
@@ -390,6 +430,7 @@ function setupSettings() {
     config.input_device_name = inDev?.name || '';
     config.output_device_name = outDev?.name || '';
     config.vdo_base_url = preset.value === 'custom' ? customUrl.value.trim() : 'https://vdo.ninja';
+    config.comms_room = roomName;
     config.comms_password = $('comms-password').value.trim();
     config.box_name = boxName;
     config.roomcap = parseInt($('roomcap').value) || null;

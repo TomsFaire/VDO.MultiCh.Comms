@@ -67,6 +67,10 @@ Bump `version` in `app/package.json` before tagging.
 
 There is no automated test suite. Verification is manual on a real Mac with a second machine or a phone as other participants; see the checklist in the plan for the intercom MVP (fresh install, abandoned wizard, 3-party audio, relaunch, crash respawn, reboot, network drop, late USB, network modes, roomcap).
 
+Also check by hand: level meters move with mic input and with remote speech; no remote audio comes out of the Mac's default output (audio bleed); Room name in Settings reconnects the box; clicking the QR copies it.
+
+The native addon (`app/native/coreaudio.mm`) keeps a per-session engine map (`startSession`/`stopSession`). This app uses only the legacy `default` session via `startAudio`/`stopAudio`, and addresses it explicitly for playback (`pushPlaybackSamples('default', ...)`, `clearPlaybackChannel(ch, 'default')`).
+
 ## Config and logs
 
 - Config: `~/.vdo-multichan/config.json` (see [handoff.md](handoff.md) for the schema)

@@ -12,5 +12,6 @@ contextBridge.exposeInMainWorld('api', {
   reconnectLine: () => ipcRenderer.invoke('reconnect-line'),
   getLineStatus: () => ipcRenderer.invoke('get-line-status'),
   getLinks: () => ipcRenderer.invoke('get-links'),
+  onAudioLevels: (cb) => ipcRenderer.on('audio-levels', (_e, levels) => cb(levels)),
   onLineStatus: (cb) => ipcRenderer.on('line-status', (_e, state) => cb(state)),
 });

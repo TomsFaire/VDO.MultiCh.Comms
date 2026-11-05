@@ -62,8 +62,10 @@ function buildPushUrl(config) {
 function buildJoinUrl(config) {
   const params = finish(new URLSearchParams({
     room: config.comms_room,
-    sampleRate: '48000',
   }), config);
+  // The receiver page needs no sampleRate; turn=off (from LAN mode) covers LAN,
+  // so stunonly is not sent on the join link.
+  params.delete('stunonly');
   return `${baseUrl(config)}/comms?${params}`;
 }
 

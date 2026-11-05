@@ -22,6 +22,8 @@ WebRTC (VDO.Ninja)  <->  other boxes and remote guests
 
 - One persistent channel per box. One room, no groups, no per-line setup.
 - Transport is [VDO.Ninja](https://vdo.ninja) (public instance by default; self-hostable).
+- Network mode defaults to Internet (STUN/TURN). Switch to LAN in Settings for boxes on one network.
+- The status card has live mic and remote level meters; the share panel's QR code copies to the clipboard when clicked.
 - The main process connects on its own at launch from saved config. No login and no Join button, so a box recovers unattended after a reboot.
 - Target deployment: a Mac running Zoom Rooms that reboots weekly, with the app started by a launchd LaunchAgent.
 
@@ -36,7 +38,7 @@ WebRTC (VDO.Ninja)  <->  other boxes and remote guests
 2. Right-click, Open on first launch (ad-hoc signed, not notarized).
 3. Allow microphone access when prompted.
 4. In the wizard, either start a new session (event name, password, box name) or join an existing one (paste the session code, enter a box name).
-5. Pick input/output devices and channels in Settings.
+5. Pick input/output devices and channels in Settings. The room name can also be changed there.
 
 Unattended installs: see [docs/deployment.md](docs/deployment.md).
 
