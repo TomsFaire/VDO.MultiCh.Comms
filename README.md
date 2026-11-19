@@ -4,6 +4,8 @@ A macOS app that turns an audio interface channel into a persistent, single-chan
 
 Status: alpha (v0.1.x).
 
+> **This (`single-channel`) is the intended intercom production branch.** `main` on this repo is a separate product, VDO.Spacial.Comms — see [docs/production.md](docs/production.md) for the branch split, the `v0.1.4` release, validated builds, and how to build from a specific commit.
+
 ## How it works
 
 ```
@@ -44,6 +46,7 @@ Unattended installs: see [docs/deployment.md](docs/deployment.md).
 
 ## Docs
 
+- [Production branch](docs/production.md) - this branch vs `main`, the `v0.1.4` release, validated builds, building from a specific commit
 - [Usage](docs/usage.md) - wizard, settings, adding remote guests
 - [Deployment](docs/deployment.md) - LaunchAgent, mic permission, weekly reboot, troubleshooting
 - [Security](docs/security.md) - password model, TURN credentials, SSO plan
