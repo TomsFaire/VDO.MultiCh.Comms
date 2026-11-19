@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "qrcode": "^1.5.4",
-    "ws": "^8.21.0"
+    "ws": "^8.23.0"
   },
   "build": {
     "appId": "com.vdo.spacial.comms",
