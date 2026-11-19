@@ -78,6 +78,18 @@ static AudioDeviceID getDefaultOutputDeviceId() {
   return id;
 }
 
+static AudioDeviceID getDefaultInputDeviceId() {
+  AudioDeviceID id = kAudioDeviceUnknown;
+  AudioObjectPropertyAddress addr = {
+    kAudioHardwarePropertyDefaultInputDevice,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 size = sizeof(id);
+  AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &id);
+  return id;
+}
+
 static Float64 getNominalSampleRate(AudioDeviceID id) {
   Float64 rate = kSourceSampleRate;
   AudioObjectPropertyAddress addr = {
@@ -353,6 +365,19 @@ static AudioEngine* playbackEngine() {
   for (auto& kv : g_sessions) {
     if (kv.second.pbRunning) return &kv.second;
   }
+  return nullptr;
+}
+
+// Engine that drains playback for an explicit session id: the session itself when
+// it owns playback, else its separate "<id>_pb" engine (capture and playback on
+// different devices). Caller must hold g_sessionsMutex.
+static AudioEngine* playbackEngineFor(const std::string& sessionId) {
+  auto it = g_sessions.find(sessionId);
+  if (it != g_sessions.end() && it->second.pbRunning)
+    return &it->second;
+  auto pb = g_sessions.find(sessionId + "_pb");
+  if (pb != g_sessions.end() && pb->second.pbRunning)
+    return &pb->second;
   return nullptr;
 }
 
@@ -677,6 +702,13 @@ static Napi::Value ListDevices(const Napi::CallbackInfo& info) {
   return result;
 }
 
+static Napi::Value GetDefaultInputDeviceUID(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  AudioDeviceID id = getDefaultInputDeviceId();
+  if (id == kAudioDeviceUnknown) return Napi::String::New(env, "");
+  return Napi::String::New(env, getStringProperty(id, kAudioDevicePropertyDeviceUID));
+}
+
 static Napi::Value GetDefaultOutputDeviceUID(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   AudioDeviceID id = getDefaultOutputDeviceId();
@@ -717,14 +749,8 @@ static Napi::Value ClearPlaybackChannel(const Napi::CallbackInfo& info) {
   // Hold g_sessionsMutex across the lookup AND the clear operation to prevent
   // a concurrent stopSession from erasing the entry mid-use (Issue 3).
   std::lock_guard<std::mutex> lk(g_sessionsMutex);
-  AudioEngine* eng = nullptr;
-  auto it = g_sessions.find(sessionId);
-  if (it != g_sessions.end()) {
-    eng = &it->second;
-  } else {
-    // Legacy fallback
-    eng = playbackEngine();
-  }
+  AudioEngine* eng = playbackEngineFor(sessionId);
+  if (!eng) eng = playbackEngine();
   if (!eng) return env.Undefined();
   clearPlaybackChannel(*eng, ch);
   return env.Undefined();
@@ -781,9 +807,7 @@ static Napi::Value PushPlaybackSamples(const Napi::CallbackInfo& info) {
   std::lock_guard<std::mutex> lk(g_sessionsMutex);
   AudioEngine* eng = nullptr;
   if (info[0].IsString()) {
-    std::string sessionId = info[0].As<Napi::String>();
-    auto it = g_sessions.find(sessionId);
-    if (it != g_sessions.end()) eng = &it->second;
+    eng = playbackEngineFor(info[0].As<Napi::String>());
   } else {
     eng = playbackEngine();
   }
@@ -839,6 +863,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("clearPlaybackChannel",      Napi::Function::New(env, ClearPlaybackChannel));
   exports.Set("playTestTone",              Napi::Function::New(env, PlayTestTone));
   exports.Set("setDefaultOutputDevice",    Napi::Function::New(env, SetDefaultOutputDevice));
+  exports.Set("getDefaultInputDeviceUID",  Napi::Function::New(env, GetDefaultInputDeviceUID));
   exports.Set("getDefaultOutputDeviceUID", Napi::Function::New(env, GetDefaultOutputDeviceUID));
   exports.Set("startSession",              Napi::Function::New(env, StartSession));
   exports.Set("stopSession",               Napi::Function::New(env, StopSession));

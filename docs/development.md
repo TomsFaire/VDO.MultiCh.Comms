@@ -1,162 +1,83 @@
-# Development Guide
-
-**Version:** v0.1.4
-
----
+# Development
 
 ## Prerequisites
 
-- macOS arm64 (Apple Silicon)
-- Node.js 18+ and npm
-- Xcode Command Line Tools (for `node-gyp` / CoreAudio N-API build)
+- macOS on Apple Silicon
+- Xcode Command Line Tools (`xcode-select --install`) for the native addon
+- Node.js 20 (matches CI)
 
-The Rust shim was removed in v0.1.1. You do **not** need Rust.
+No Rust toolchain is needed; the old Rust/CPAL shim is gone.
 
----
+## Layout
 
-## Build the CoreAudio native addon
-
-Required before dev run or DMG build.
-
-```bash
-cd app/native
-npm install
-npm run build
-# → app/native/build/Release/coreaudio.node
+```
+app/                 Electron app (package.json, main.js, preload.js, renderer/)
+app/native/          CoreAudio N-API addon (coreaudio.mm, binding.gyp)
+app/scripts/         bump-build.js, make-icns.sh
+packaging/           LaunchAgent plist and install script
+.github/workflows/   release.yml
 ```
 
-Rebuild after any change to `coreaudio.mm`.
+## Build and run
 
----
+```bash
+# 1. App dependencies
+cd app
+npm ci
 
-## Run in dev mode
+# 2. CoreAudio addon (node-gyp; links CoreAudio + Foundation, deployment target 12.0)
+cd native
+npm install        # runs `node-gyp rebuild` via the install script
+npm run build      # rebuild explicitly after editing coreaudio.mm
+cd ..
+
+# 3. Run in dev
+npm start          # electron .
+```
+
+The addon outputs `app/native/build/Release/coreaudio.node`. Dev runs load it from there; packaged builds load it from `Resources/coreaudio.node` (electron-builder `extraResources`).
+
+If the addon fails to load after an Electron upgrade, rebuild it; the addon is N-API so it should not need per-Electron-version rebuilds, but a stale build directory can cause trouble (`rm -rf app/native/build` and rebuild).
+
+## Package a DMG
 
 ```bash
 cd app
-npm install
-npm start
+npm run build        # bump-build.js, then electron-builder (arm64 dmg) -> app/dist/
+npm run build:dir    # unpacked .app only, faster for testing
 ```
 
-Config is created on first run at `~/.vdo-multichan/config.json`.
+`scripts/bump-build.js` increments the build number in `app/build-meta.json` on each build.
 
----
+Unsigned local builds: `CSC_IDENTITY_AUTO_DISCOVERY=false npm run build`, then optionally `codesign --force --deep --sign - dist/*.dmg`.
 
-## Build a distributable DMG
+## Release
 
-```bash
-cd app/native && npm install && npm run build
-cd .. && npm run build
-# → app/dist/VDO.MultiCh.Comms-<version>-arm64.dmg
-```
-
-`scripts/bump-build.js` auto-increments the build number in `app/build-meta.json` before each dist build.
-
-Pre-built releases are published on the [GitHub Releases page](https://github.com/TomsFaire/VDO.MultiCh.Comms/releases) when a `v*.*.*` tag is pushed.
-
----
-
-## Viewing logs from the packaged app
-
-```bash
-/Applications/VDO.MultiCh.Comms.app/Contents/MacOS/VDO.MultiCh.Comms
-```
-
-Eject a mounted DMG before rebuilding:
-
-```bash
-hdiutil detach "/Volumes/VDO.MultiCh.Comms <version>" -force
-```
-
----
-
-## CI / releases
-
-`.github/workflows/release.yml` runs on tag push `v*.*.*`:
+Push a tag matching `v*.*.*`. `.github/workflows/release.yml` (macos-latest, Node 20):
 
 1. `npm ci` in `app/`
-2. Build `coreaudio.node` in `app/native/`
-3. `npm run build` → DMG
-4. Ad-hoc sign, SHA-256 checksums, publish via `softprops/action-gh-release`
+2. `npm install` + `npm run build` in `app/native/`
+3. `npm run build` in `app/` with `CSC_IDENTITY_AUTO_DISCOVERY=false`
+4. Ad-hoc sign the DMG, write `sha256sums.txt`
+5. Publish a GitHub Release with release notes from the commit log since the previous tag
 
-To cut a release:
+Bump `version` in `app/package.json` before tagging.
 
-```bash
-# 1. Update version in app/package.json and app/build-meta.json
-# 2. Commit, tag, push
-git add app/package.json app/build-meta.json
-git commit -m "chore: bump version to x.y.z"
-git tag vx.y.z
-git push origin vx.y.z
-# CI builds and publishes the DMG automatically
-```
+## Testing
 
----
+There is no automated test suite. Verification is manual on a real Mac with a second machine or a phone as other participants; see the checklist in the plan for the intercom MVP (fresh install, abandoned wizard, 3-party audio, relaunch, crash respawn, reboot, network drop, late USB, network modes, roomcap).
 
-## Repo layout
+Also check by hand: level meters move with mic input and with remote speech; no remote audio comes out of the Mac's default output (audio bleed); Room name in Settings reconnects the box; clicking the QR copies it.
 
-```
-app/
-  main.js              Main process — CoreAudio, IPC, WebContentsView, line preloads
-  preload.js           Renderer preload — IPC bridge
-  build-meta.json      { "version", "build" }
-  package.json         electron-builder; extraResources ships coreaudio.node
-  renderer/
-    app.js             UI — comms bar, groups, line connect, settings, meters
-    index.html         UI shell + styles
-  native/
-    coreaudio.mm       CoreAudio capture/playback N-API addon
-    binding.gyp
-    package.json       node-gyp build scripts
-  scripts/
-    bump-build.js      Auto-increment build before dist
+The native addon (`app/native/coreaudio.mm`) keeps a per-session engine map (`startSession`/`stopSession`). This app uses only the legacy `default` session via `startAudio`/`stopAudio`, and addresses it explicitly for playback (`pushPlaybackSamples('default', ...)`, `clearPlaybackChannel(ch, 'default')`).
 
-docs/
-  usage.md             End-user guide
-  development.md       This file
-  handoff.md           Maintainer handoff (deeper IPC/config detail)
-  known-issues.md      Status and bugs
-  self-hosting.md      VDO.ninja / TURN
-  screenshot-v0.1.3.png  UI screenshot
-```
+## Config and logs
 
----
+- Config: `~/.vdo-multichan/config.json` (see [handoff.md](handoff.md) for the schema)
+- Delete it to re-run the wizard
+- Runtime logs: see [deployment.md](deployment.md#troubleshooting)
 
-## Architecture notes
+## Notes
 
-### CoreAudio sessions
-
-The N-API addon (`coreaudio.node`) manages a `std::map<string, AudioEngine>` keyed by session ID:
-
-- **`"default"`** — shared session opened by `startAudio(capUid, nIn, pbUid, nOut, cb)` at startup. Handles all lines that use the global device. Capture is demultiplexed per channel; playback is per-channel ring buffers.
-- **`"pl-N"` / `"pl-N_pb"`** — per-PL sessions opened by `startSession(sessionId, capUid, capCh, pbUid, pbCh, cb)` when a line has dedicated devices. Separate capture callback and playback ring for full isolation.
-
-Key exports: `startSession`, `stopSession`, `pushPlaybackSamples(sessionId, ch, data, gain)`, `clearPlaybackChannel(ch, sessionId)`, `listDevices`, `playTestTone`.
-
-### IPC audio bridge
-
-- **Capture:** `captureCallback(ch, samples)` looks up `channelViews[ch]` (shared) or `sessionViews[lineId]` (per-PL) and calls `webContents.send('audio-frame', ch, samples)` to the correct line view. Input gain (`gain_in`) is applied before send.
-- **Playback:** line shims call `ipcRenderer.send('playback-frame', outCh, samples, gain)`. Main process routes to `pushPlaybackSamples('pl-N', 0, ...)` for per-PL sessions or `pushPlaybackSamples('default', outCh, ...)` for shared lines. Output gain is read from the live `outputGainByLineId` cache.
-
-### Shim (per-line preload)
-
-`buildLineShim(inputChannel, outputChannel, gainOut, group, stripIce)` generates a preload script written to a temp file at connect time. It:
-
-1. Overrides `getUserMedia` to inject an `AudioWorklet`-fed `MediaStreamDestination` stream (mic path)
-2. Patches `RTCPeerConnection` to strip ICE servers when `STRIP_ICE` is true
-3. Watches DOM for `<video>`/`<audio>` elements — immediately mutes them (`el.muted = true; el.volume = 0`) and taps their `srcObject` via a second AudioWorklet (remote tap path)
-4. Sends captured remote audio frames back via `playback-frame` IPC
-
-### LAN vs WAN mode
-
-`webrtc_lan_mode: true` → `STRIP_ICE = true` in the shim (strips `iceServers` from all `RTCPeerConnection` configs) and adds `stunonly=1` to VDO.ninja URLs. Suppresses Chromium DNS resolution errors for TURN hosts on isolated LANs. Default is `false` (WAN/TURN enabled) for cross-building deployments.
-
-### Level meters
-
-`coreAudio.startAudio` fires ~30 times/sec. Main process tracks rolling peaks in `capturePeaks` and `playbackPeaks` maps (decayed by `LEVEL_DECAY = 0.85` each tick). Sent to renderer via `audio-levels` IPC; renderer maps 0–0.5 float to 0–100% bar width with color thresholds at 60% (yellow) and 95% (red).
-
----
-
-## Further reading
-
-- [handoff.md](handoff.md) — config model, URL builders, native addon API
-- [known-issues.md](known-issues.md) — open limitations and resolved issues
+- Do not commit `.env` files; `.claude/plans/` is git-ignored.
+- `session.setPreloads` is deprecated in newer Electron; migrate to `registerPreloadScript` when convenient.
