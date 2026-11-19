@@ -25,7 +25,7 @@ The closest thing to a validated single-channel release right now is the `produc
 
 Only one commit on this line has recorded field-validation evidence:
 
-- **`d8b9088`** (`build: v0.2.0 build 6 test DMG`) — tagged `production-baseline-2026-11-04`, branch `production`. A two-machine cross-network test passed with no audio issues. One commit later (`40ca7ec`, in build 7 / current `single-channel` tip) added a phone-QR-join fix that has **not** been field-confirmed.
+- **`d8b9088`** (`build: v0.2.0 build 6 test DMG`) — tagged `production-baseline-2026-11-04`, branch `production`. Confirmed by the owner as the build used in the **SF–NYC rehearsal**: audio worked without issues. (PR #18 separately describes this same build's pre-rehearsal bring-up as "a cross-network test between the laptop and the office machine.") One commit later (`40ca7ec`, in build 7 / current `single-channel` tip) added a phone-QR-join fix that has **not** been field-confirmed.
 
 `single-channel`'s tip moves ahead of this as development continues. Before calling any later commit "production-validated," get the same kind of direct confirmation and record it the same way (a tagged commit, not an assumption) — see [PR #18](https://github.com/TomsFaire/VDO.MultiCh.Comms/pull/18) for the full unticked validation checklist (reboot persistence, 3-participant audio, Wi-Fi reconnect, USB hot-plug, etc.) that still applies to anything past build 6.
 
